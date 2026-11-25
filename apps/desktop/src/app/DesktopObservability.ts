@@ -351,7 +351,7 @@ const readPersistedObservabilitySettings: Effect.Effect<
 
 const resolveOtlpEndpoints = Effect.gen(function* () {
   const otel = yield* OtelEnvironment.load;
-  if (otel.disabled) {
+  if (OtelEnvironment.telemetryDisabled() || otel.disabled) {
     return {
       traces: undefined,
       metrics: undefined,

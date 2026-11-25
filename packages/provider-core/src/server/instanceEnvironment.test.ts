@@ -7,6 +7,16 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import { mergeProviderInstanceEnvironment } from "./instanceEnvironment.ts";
 
+const privacyEnvironment = {
+  DO_NOT_TRACK: "1",
+  CLERK_TELEMETRY_DISABLED: "1",
+  DISABLE_TELEMETRY: "1",
+  DISABLE_ERROR_REPORTING: "1",
+  OTEL_SDK_DISABLED: "true",
+  T3CODE_OTEL_SDK_DISABLED: "true",
+  T3CODE_TELEMETRY_ENABLED: "false",
+};
+
 describe("mergeProviderInstanceEnvironment", () => {
   it.effect.each([
     { value: "~/.account", tail: ".account" },
@@ -30,6 +40,7 @@ describe("mergeProviderInstanceEnvironment", () => {
       );
 
       expect(environment).toEqual({
+        ...privacyEnvironment,
         CODEX_HOME: path.join("/home/ada", tail),
         CLAUDE_CONFIG_DIR: path.join("/home/ada", tail),
         GROK_HOME: path.join("/home/ada", tail),
@@ -55,7 +66,7 @@ describe("mergeProviderInstanceEnvironment", () => {
           [{ name: "CUSTOM_VALUE", value: "~/.custom", sensitive: false }],
           baseEnv,
         ),
-      ).toEqual({ ...baseEnv, CUSTOM_VALUE: "~/.custom" });
+      ).toEqual({ ...privacyEnvironment, ...baseEnv, CUSTOM_VALUE: "~/.custom" });
     }),
   );
 
@@ -123,6 +134,7 @@ describe("mergeProviderInstanceEnvironment", () => {
         });
 
         expect(merged).toEqual({
+          ...privacyEnvironment,
           PATH: ":/usr/bin",
           LD_LIBRARY_PATH: keptLibraryPath,
           XDG_DATA_DIRS: "/usr/share",
@@ -147,10 +159,15 @@ describe("mergeProviderInstanceEnvironment", () => {
           Effect.provideService(HostProcess.Platform, "win32"),
           Effect.provideService(HostProcess.HomeDirectory, "/home/ada"),
         ),
-      ).toEqual({ CODEX_HOME: "/home/ada/corp" });
+      ).toEqual({ ...privacyEnvironment, CODEX_HOME: "/home/ada/corp" });
       // Upper case sorts first, so it also wins where a spawn merges the parent environment back.
-      expect(yield* merge("win32")).toEqual({ HTTPS_PROXY: "http://gateway", PATH: "/bin" });
+      expect(yield* merge("win32")).toEqual({
+        ...privacyEnvironment,
+        HTTPS_PROXY: "http://gateway",
+        PATH: "/bin",
+      });
       expect(yield* merge("linux")).toEqual({
+        ...privacyEnvironment,
         HTTPS_PROXY: "http://mine",
         Https_Proxy: "http://gateway",
         PATH: "/bin",
@@ -158,3 +175,22 @@ describe("mergeProviderInstanceEnvironment", () => {
     }),
   );
 });
+
+it.effect("cannot re-enable known provider telemetry with host or instance environment", () =>
+  Effect.gen(function* () {
+    const environment = yield* mergeProviderInstanceEnvironment(
+      [
+        { name: "otel_sdk_disabled", value: "false", sensitive: false },
+        { name: "T3CODE_TELEMETRY_ENABLED", value: "true", sensitive: false },
+        { name: "DISABLE_ERROR_REPORTING", value: "0", sensitive: false },
+      ],
+      { OTEL_SDK_DISABLED: "false", OPENAI_API_KEY: "preserved", PATH: "/bin" },
+    );
+    expect(environment).toMatchObject({
+      ...privacyEnvironment,
+      OPENAI_API_KEY: "preserved",
+      PATH: "/bin",
+    });
+    expect(environment).not.toHaveProperty("otel_sdk_disabled");
+  }),
+);

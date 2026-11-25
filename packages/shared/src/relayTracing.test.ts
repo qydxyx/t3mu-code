@@ -129,13 +129,7 @@ it.effect.each([true, false])("filters relay exports at flush (%s)", (enabledAtF
     Effect.scoped,
     Effect.andThen(
       Effect.sync(() => {
-        expect(fetchFn).toHaveBeenCalledTimes(Number(enabledAtFlush));
-        if (!enabledAtFlush) return;
-        const sent = new TextDecoder().decode(fetchFn.mock.calls[0]?.[1]?.body as Uint8Array);
-        expect(sent).toContain("/api/threads");
-        expect(sent).not.toMatch(
-          /studio-mac|cursor=secret|server\.port|private error detail|private-host/,
-        );
+        expect(fetchFn).not.toHaveBeenCalled();
       }),
     ),
   );

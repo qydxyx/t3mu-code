@@ -5,6 +5,22 @@ import * as Effect from "effect/Effect";
 
 import { expandHomeVariable } from "./pathExpansion.ts";
 
+const withoutTelemetry = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
+  const disabled: Record<string, string> = {
+    DO_NOT_TRACK: "1",
+    CLERK_TELEMETRY_DISABLED: "1",
+    DISABLE_TELEMETRY: "1",
+    DISABLE_ERROR_REPORTING: "1",
+    OTEL_SDK_DISABLED: "true",
+    T3CODE_OTEL_SDK_DISABLED: "true",
+    T3CODE_TELEMETRY_ENABLED: "false",
+  };
+  const next = Object.fromEntries(
+    Object.entries(env).filter(([name]) => !Object.hasOwn(disabled, name.toUpperCase())),
+  );
+  return { ...next, ...disabled };
+};
+
 export const mergeProviderInstanceEnvironment = Effect.fn(function* (
   environment: ProviderInstanceEnvironment | undefined,
   baseEnv: NodeJS.ProcessEnv = process.env,
@@ -12,7 +28,7 @@ export const mergeProviderInstanceEnvironment = Effect.fn(function* (
   // Commands the agent runs inherit this env; the AppImage mount's libraries would shadow the system's.
   const hostEnv = stripAppImageRuntimeEnv(baseEnv);
   if (!environment || environment.length === 0) {
-    return hostEnv;
+    return withoutTelemetry(hostEnv);
   }
 
   const home = yield* HostProcess.HomeDirectory;
@@ -32,5 +48,5 @@ export const mergeProviderInstanceEnvironment = Effect.fn(function* (
     }
     next[name] = expandHomeVariable(name, variable.value, home);
   }
-  return next;
+  return withoutTelemetry(next);
 });

@@ -1,5 +1,3 @@
-import * as Axiom from "@alchemy.run/axiom";
-import { Observability } from "./observability.ts";
 import * as Cloudflare from "@alchemy.run/cloudflare";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
@@ -105,11 +103,6 @@ export const layer = Worker.make(
       Cloudflare.R2.ReadWriteBucketBinding,
       Cloudflare.Workers.RateLimitBinding,
       Cloudflare.Workers.CronEventSourceLive,
-      Layer.unwrap(
-        Effect.map(Observability, ({ traces, token }) =>
-          Axiom.Telemetry({ serviceName: "t3-task-cache", traces, token }),
-        ),
-      ),
     ]),
   ),
 );

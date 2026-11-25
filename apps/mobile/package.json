@@ -175,6 +175,9 @@
       ]
     },
     "autolinking": {
+      "exclude": [
+        "expo-observe"
+      ],
       "buildFromSource": [
         "@expo/ui",
         "expo-ui",

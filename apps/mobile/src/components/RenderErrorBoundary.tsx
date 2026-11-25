@@ -1,4 +1,4 @@
-import { Observe } from "expo-observe";
+import { Observe } from "../features/observability/observe";
 import { T, useGT } from "gt-react-native";
 import { Component, type ReactNode } from "react";
 import { ScrollView, View } from "react-native";

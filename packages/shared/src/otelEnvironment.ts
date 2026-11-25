@@ -10,6 +10,9 @@ import type { OtlpEndpointSource } from "@t3tools/contracts";
 
 import { OtlpHeadersFromString, OtlpProtocol, type SignalExport } from "./observability.ts";
 
+// Only a source change can re-enable exports in this fork.
+export const telemetryDisabled = (): boolean => true;
+
 type OtlpSignalName = "TRACES" | "METRICS" | "LOGS";
 
 export type OtelSignal = Data.TaggedEnum<{
@@ -282,7 +285,7 @@ export const load: Effect.Effect<OtelEnvironment> = Config.all({
   }),
 }).pipe(
   Effect.map(({ t3, spec, resource, generic, exporters, ...own }) => {
-    const disabled = t3.value ?? spec.value ?? false;
+    const disabled = telemetryDisabled() || (t3.value ?? spec.value ?? false);
     const signals = disabled
       ? undefined
       : {
@@ -301,9 +304,11 @@ export const load: Effect.Effect<OtelEnvironment> = Config.all({
     ].filter((warning) => warning !== undefined);
     if (disabled) {
       warnings.push(
-        t3.value
-          ? "T3CODE_OTEL_SDK_DISABLED is set, so no telemetry is exported, whatever configured it"
-          : "OTEL_SDK_DISABLED is set, so no telemetry is exported, whatever configured it; set T3CODE_OTEL_SDK_DISABLED=false to export anyway",
+        telemetryDisabled()
+          ? "This fork disables all telemetry export at source level"
+          : t3.value
+            ? "T3CODE_OTEL_SDK_DISABLED is set, so no telemetry is exported, whatever configured it"
+            : "OTEL_SDK_DISABLED is set, so no telemetry is exported, whatever configured it; set T3CODE_OTEL_SDK_DISABLED=false to export anyway",
       );
     }
     return {
@@ -342,7 +347,7 @@ export const isCiEnvironment = (env: Readonly<Record<string, string | undefined>
     return value !== undefined && value !== "" && value !== "false" && value !== "0";
   });
 
-/** The cross-tool `DO_NOT_TRACK=1` convention turns off product analytics and relay tracing. */
+/** Upstream cross-tool convention; this fork remains disabled regardless of its value. */
 export const isDoNotTrackSet = (env: Readonly<Record<string, string | undefined>>) =>
   T3CODE_TRUE.includes(env.DO_NOT_TRACK?.trim().toLowerCase() ?? "");
 
@@ -353,8 +358,8 @@ export const isRelayTracingEnabled = (env: Readonly<Record<string, string | unde
   }).pipe(
     Effect.map(
       ({ telemetry, t3, spec }) =>
+        !telemetryDisabled() &&
         (telemetry.value ?? !isCiEnvironment(env)) &&
-        !isDoNotTrackSet(env) &&
         !(t3.value ?? spec.value ?? false),
     ),
     Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnvRecord(env))),
@@ -378,7 +383,7 @@ export const resolveSignalEndpoint = (
   t3: { readonly url: string | undefined; readonly export: SignalExport },
   fallback: { readonly bootstrapUrl: string | undefined; readonly settingsUrl: string | undefined },
 ): SignalEndpoint | undefined => {
-  if (otel.disabled) {
+  if (telemetryDisabled() || otel.disabled) {
     return undefined;
   }
   const t3Url = blankAsUnset(t3.url);
@@ -424,7 +429,7 @@ export const layerResourceAttributes = (attributes: Readonly<Record<string, stri
   );
 
 export const none: OtelEnvironment = {
-  disabled: false,
+  disabled: true,
   warnings: [],
   resourceAttributes: {},
   traces: OtelSignal.Unset(),

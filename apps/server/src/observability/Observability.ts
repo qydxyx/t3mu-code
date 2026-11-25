@@ -55,7 +55,7 @@ export const layer = Layer.unwrap(
             }),
         });
         const delegate =
-          config.otlpTracesUrl === undefined
+          OtelEnvironment.telemetryDisabled() || config.otlpTracesUrl === undefined
             ? undefined
             : yield* OtlpTracer.make({
                 url: config.otlpTracesUrl,
@@ -84,7 +84,7 @@ export const layer = Layer.unwrap(
     ).pipe(Layer.provide(OtlpExporter.layerFlusher), Layer.provideMerge(layerSerialization));
 
     const metricsLayer =
-      config.otlpMetricsUrl === undefined
+      OtelEnvironment.telemetryDisabled() || config.otlpMetricsUrl === undefined
         ? Layer.empty
         : OtlpMetrics.layer({
             url: config.otlpMetricsUrl,

@@ -1,3 +1,4 @@
+import { telemetryDisabled } from "@t3tools/shared/otelEnvironment";
 import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
@@ -256,6 +257,7 @@ const make = Effect.gen(function* () {
       signal,
     }: { readonly projectId: string; readonly signal: RelayMobileTelemetrySignal },
   ) {
+    if (telemetryDisabled()) return HttpServerResponse.empty({ status: 204 });
     const outcome = (value: string) =>
       Effect.annotateCurrentSpan({ "relay.mobile_telemetry.outcome": value });
     yield* Effect.annotateCurrentSpan({

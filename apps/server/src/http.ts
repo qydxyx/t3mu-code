@@ -1,3 +1,4 @@
+import { telemetryDisabled } from "@t3tools/shared/otelEnvironment";
 import * as Mime from "effect/http/Mime";
 import {
   AuthOrchestrationOperateScope,
@@ -464,7 +465,7 @@ export const layerOtlpTracesProxyRoute = HttpRouter.add(
       Effect.catch((cause) => Effect.logWarning("Failed to decode browser OTLP traces", { cause })),
     );
 
-    if (otlpTracesUrl === undefined) {
+    if (telemetryDisabled() || otlpTracesUrl === undefined) {
       return HttpServerResponse.empty({ status: 204 });
     }
 
