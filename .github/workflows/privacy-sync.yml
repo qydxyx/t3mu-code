@@ -26,6 +26,11 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          # Match upstream CI: vendored .repos contains incomplete nested gitlinks.
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
       - name: Check trusted maintenance snapshot
         run: python3 privacy/check.py
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6

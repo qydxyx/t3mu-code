@@ -19,6 +19,10 @@
 
 本次交付已人工审阅并覆盖用户指定的 ef4a 增量，不冒称后续 91f0 的业务/数据库改动也已审查通过；那一批由后续维护按 AUDIT 流程处理。上游持续变化是设计中必须 fail-closed 的场景，不自动放宽 allowlist、不为追上移动目标无限扩展此次修改。
 
+## 实际 GitHub CI 发现与修复
+
+首次功能分支 push 已真实触发 Privacy regression。第一次远程任务在 checkout 清理认证时因上游 `.repos/alchemy-effect/submodules/distilled` 缺少 .gitmodules URL 失败，还没有执行 Python/Node 测试。按上游已有 ci.yml 的同样做法给两份 workflow 添加非 cone sparse checkout 排除 `.repos/`，不修改 vendored 内容、不恢复持久凭据；完整 git tree 仍用于 review gate。后续远程执行结果以 Actions 页面为准，不把首次失败隐藏为通过。
+
 ## 安装安全与未运行项
 
 本轮 ef4a 的依赖安装明确使用 `--frozen-lockfile --ignore-scripts --ignore-pnpmfile` 和 npm_config_ignore_scripts=true；先人工审阅完整源码与 lock/本地 native tgz 增量。早先 c925 探索阶段曾因 pnpm exec 自动触发生命周期/prepare，这不是本轮安全重放命令，不能把整个历史描述成从未执行过脚本。

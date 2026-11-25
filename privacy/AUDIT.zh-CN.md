@@ -53,3 +53,5 @@ Standards：保留 Effect service 接口，未引入新的 SDK 或 React effect�
 Spec：受控 update 固定真实上游/main；源码/lock/config 增量先人工审查，不执行未经审阅的新代码。工作树隔离、失败保持 last-good、重复候选不二次 apply。CI 不使用 pull_request_target，不挂载 secrets/write token，checkout 不持久化凭据，依赖安装禁 lifecycle/pnpmfile。每日流程只读，不自动 push/开 PR/merge；任意运行时代码更新仍需人工适配，这是明确边界而不是宣称全自动合并。普通 git pull 不自动重放 patch；若覆盖边界或出现新源码，CI 门禁失败。
 
 修正：发现把旧独立 kit 原样放入 fork 会被额外文件守卫阻挡，新增精确维护层校验和四个测试；发现重复运行需拒绝已变异 last-good，补生命周期测试。没有可用独立 review 子代理，以上为自审，不冒充独立审查。建议另行配置 GitHub 分支保护，将 Privacy regression / privacy 设为 required，不能仅靠仓库文件阻止管理员绕过/修改守卫。
+
+实际远程 CI 首次 checkout 因 .repos 的不完整嵌套 gitlink 失败；使用上游自身 CI 已用的 sparse checkout 排除 .repos，保持 persist-credentials:false。没有通过持久化 token 或修改 vendored 仓库来绕开错误。
