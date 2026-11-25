@@ -52,7 +52,7 @@ update 默认状态目录为 clone 同级的 `<clone-name>-privacy-state`，可�
 
 - `.github/workflows/privacy.yml`：普通 push / PR / 手动触发，依赖安装前检查来源与边界，之后跑契约测试、lint、typecheck。
 - `.github/workflows/privacy-sync.yml`：手动和工作日 **北京时间 09:00（UTC+8）** 获取上游、隔离重放；GitHub 可能延迟调度。遇代码变化失败并产出 `privacy-upstream-review` 文本 artifact，供人工审查。**只读权限，不自动 push、PR 或 merge，不自动执行未审阅的新代码**。
-- action 引用固定 commit；checkout `persist-credentials:false`，无 secrets，`contents:read`，不用 `pull_request_target`，不复用共享依赖缓存。未配置仓库分支保护/required status（需管理员操作）；仅推功能分支不改变 main。
+- 第三方 action 引用固定 commit；公共仓库直接对固定 URL 无凭据 git fetch 事件 SHA（不传 token、不配置 credential helper），无 secrets，`contents:read`，不用 `pull_request_target`，不复用共享依赖缓存。未配置仓库分支保护/required status（需管理员操作）；仅推功能分支不改变 main。
 - **schedule 只有流程合并到默认 main 且 Actions 启用后才生效**。本交付不擅自 merge；功能分支 push 可触发回归流程，不等于 daily 已启用。
 - 避免和本机例程重复执行：由父代理在确认 main 上 daily 已实际启用后停用本机例程；本次工具未创建/修改例程。
 - Actions runner 不持久保存 worktree/current；每次从 GitHub 中已通过审查的 fork 与 patch 重建。上次通过版本始终留在分支历史；状态目录只对同一台本机更新器持久。不会把 runner 临时目录误称为长期部署。

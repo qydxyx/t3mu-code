@@ -11,7 +11,7 @@
 - Python **19 个**守卫/维护层/更新器生命周期测试通过：普通 docs 放行、运行时代码/新 SDK/依赖/lock/隐藏配置/可执行或 symlink Markdown 阻断、维护层精确匹配、拒绝额外 SDK、重复候选不二次 apply、不晋升失败候选、拒绝变异 last-good。
 - 真实 `update.py --baseline` 从干净 ef4a 基线创建独立 worktree，干净 apply、禁 lifecycle 安装、完整上述检查后才晋升 current。并非复用手改的旧 c925 结果。
 - 真实负例：把 server AnalyticsService 临时换回未补丁上游实现，`privacy/check.py` 非零并指出 Patched boundary changed；新增未知 collector 出口文件也非零。负例文件已还原/移除；现有边界再次通过。
-- 官方 actionlint **1.7.12** 两份 workflow 校验通过（下载包 SHA256 校验），Python 编译、`git diff --check`（排除 patch 数据文件固有的上下文空白；patch 由真实 apply 校验）通过；actions/checkout、setup-node、upload-artifact 固定 commit。
+- 官方 actionlint **1.7.12** 两份 workflow 校验通过（下载包 SHA256 校验），Python 编译、`git diff --check`（排除 patch 数据文件固有的上下文空白；patch 由真实 apply 校验）通过；setup-node、upload-artifact 固定 commit；初版 checkout 也固定 commit，但因下述上游 gitlink 问题移除。
 
 ## 干净 clone 与交付时上游继续前进
 
@@ -21,7 +21,9 @@
 
 ## 实际 GitHub CI 发现与修复
 
-首次功能分支 push 已真实触发 Privacy regression。第一次远程任务在 checkout 清理认证时因上游 `.repos/alchemy-effect/submodules/distilled` 缺少 .gitmodules URL 失败，还没有执行 Python/Node 测试。按上游已有 ci.yml 的同样做法给两份 workflow 添加非 cone sparse checkout 排除 `.repos/`，不修改 vendored 内容、不恢复持久凭据；完整 git tree 仍用于 review gate。后续远程执行结果以 Actions 页面为准，不把首次失败隐藏为通过。
+首次功能分支 push 已真实触发 Privacy regression。前两次远程任务都在 checkout 的认证清理中因上游 `.repos/alchemy-effect/submodules/distilled` 没有 .gitmodules URL 失败，还没有执行 Python/Node 测试；排除 .repos 的 sparse checkout 仍不能阻止 git submodule foreach 读取 index，已在本机复现，不能把第二次也声称修好了。
+
+最终去掉有此清理问题的 checkout action：仓库本身公开，使用固定 qydxyx/t3mu-code URL、严格校验的 github.sha，直接无凭据 git fetch（credential.helper 和 http.extraheader 均清空），核实 FETCH_HEAD 与事件 commit 完全一致后 checkout；不运行任何 submodule 命令、不传/持久化任何 checkout token、不修改 .repos。PR 从目标公开仓库的事件 merge commit 获取，后续候选代码仍只有 read 权限、不带 secrets。其余 actions 仍固定 SHA。最终远程结果以 Actions 页面为准，不把前两次失败隐藏为通过。
 
 ## 安装安全与未运行项
 

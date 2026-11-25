@@ -7,9 +7,9 @@
   "review_note": "AUDIT.zh-CN.md",
   "kit_hashes": {
     ".gitignore": "862263fa1f46c20f0d1e4dac5ffcc75abd55c08211b2c3864c5f8764b9d87793",
-    "AUDIT.zh-CN.md": "0f7469b999b9afab0445ace18baa9603c417bec1f0cc338b6885bd4342d54900",
-    "README.zh-CN.md": "adc05d142e8456cf4f34458cd54cb90b7240b4670ac730196602b221adfb8daa",
-    "VALIDATION.zh-CN.md": "97021b5137b535d94804e5d0c1b272ac311d101a1bb51e2d5ed807db48427481",
+    "AUDIT.zh-CN.md": "aff614c107cea656dfaa2d0bd0c56a0b8ab9be64b0e65f0d5fcd2386455c4079",
+    "README.zh-CN.md": "3fceadac452538c1e079cf98f14fc68de5722ebccf29aded335b7cead1a3ca22",
+    "VALIDATION.zh-CN.md": "564198754067b39ad8a50ad45ae42237ec32cc6bcfbac618fd9f070b7bdfb765",
     "apply.py": "34955bd6774bb9a965ae3e1df99ac127460c545318342c62da9a816abbe53bfc",
     "check.py": "507151890b202624da7c133c458cac5a5d926abe876d63be9f98c9554d5803b2",
     "daily.py": "83c6e77f9f2b6586150caab054b99e5f861bbfd54bce79febdf397f51752e2d1",
@@ -24,8 +24,8 @@
     "verify.py": "ab910c303b7b4587b0d9c861d967fd77b61a4e08c72dea832b7693fe28f2b790"
   },
   "maintenance_files": {
-    ".github/workflows/privacy.yml": "990c8bd1f2b5867b23856f6cdded786d8bd849108bf607e39f9cfb413a7bde6e",
-    ".github/workflows/privacy-sync.yml": "38240a782b9465158d9a346d97631e56d5d39368d4ee40dd6e1e2ec8b99d9d9c"
+    ".github/workflows/privacy.yml": "81f6f6482e9640eeb982a621a18af685cd6c7aec965a2012d5bd7160ab912deb",
+    ".github/workflows/privacy-sync.yml": "bd86726b204a0344bdadb2f87106112318671cb3238d7f891818fc48091ef2bc"
   },
   "patched_files": {
     "apps/desktop/src/app/DesktopObservability.ts": "dc170673f3d3f01dc5681b3fe16043220177c83c83901e55adc46ac2d101beec",

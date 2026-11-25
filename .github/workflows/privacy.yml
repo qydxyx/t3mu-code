@@ -10,6 +10,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   privacy:
+    if: github.repository == 'qydxyx/t3mu-code'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -23,15 +24,18 @@ jobs:
       VP_REMOTE_CACHE: "off"
       npm_config_ignore_scripts: "true"
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-          # Match upstream CI: vendored .repos contains incomplete nested gitlinks.
-          sparse-checkout: |
-            /*
-            !/.repos/
-          sparse-checkout-cone-mode: false
+      # checkout's persist-credentials:false cleanup traverses malformed upstream gitlinks.
+      # This repository is public: fetch the event SHA without ANY checkout credential.
+      - name: Public credential-free checkout of the exact event commit
+        env:
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          [[ "$EVENT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git init .
+          git remote add origin https://github.com/qydxyx/t3mu-code.git
+          git -c credential.helper= -c http.extraheader= -c core.hooksPath=/dev/null fetch --no-tags --no-recurse-submodules origin "$EVENT_SHA"
+          test "$(git rev-parse FETCH_HEAD)" = "$EVENT_SHA"
+          git -c core.hooksPath=/dev/null checkout --detach FETCH_HEAD
       - name: Check reviewed source before dependency installation
         run: |
           python3 privacy/check.py

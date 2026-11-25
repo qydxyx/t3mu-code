@@ -54,4 +54,4 @@ Spec：受控 update 固定真实上游/main；源码/lock/config 增量先人�
 
 修正：发现把旧独立 kit 原样放入 fork 会被额外文件守卫阻挡，新增精确维护层校验和四个测试；发现重复运行需拒绝已变异 last-good，补生命周期测试。没有可用独立 review 子代理，以上为自审，不冒充独立审查。建议另行配置 GitHub 分支保护，将 Privacy regression / privacy 设为 required，不能仅靠仓库文件阻止管理员绕过/修改守卫。
 
-实际远程 CI 首次 checkout 因 .repos 的不完整嵌套 gitlink 失败；使用上游自身 CI 已用的 sparse checkout 排除 .repos，保持 persist-credentials:false。没有通过持久化 token 或修改 vendored 仓库来绕开错误。
+实际远程 CI 前两次 checkout 因 .repos 的不完整嵌套 gitlink 失败；sparse checkout 不能阻止 git submodule foreach 从 index 报错（本机也复现）。最终使用固定公共仓库 URL + 严格事件 SHA 的无凭据 git fetch/checkout，清空 credential helper/HTTP extraheader，不配置/传入 checkout token，不执行 submodule foreach，不修改 vendored 内容。没有以持久化 token 换取 CI 通过。
