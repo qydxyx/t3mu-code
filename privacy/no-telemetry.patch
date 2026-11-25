@@ -1,0 +1,3439 @@
+diff --git a/apps/desktop/src/app/DesktopObservability.ts b/apps/desktop/src/app/DesktopObservability.ts
+index 16192fff46..80bff1ea4d 100644
+--- a/apps/desktop/src/app/DesktopObservability.ts
++++ b/apps/desktop/src/app/DesktopObservability.ts
+@@ -351,7 +351,7 @@ const readPersistedObservabilitySettings: Effect.Effect<
+ 
+ const resolveOtlpEndpoints = Effect.gen(function* () {
+   const otel = yield* OtelEnvironment.load;
+-  if (otel.disabled) {
++  if (OtelEnvironment.telemetryDisabled() || otel.disabled) {
+     return {
+       traces: undefined,
+       metrics: undefined,
+diff --git a/apps/mobile/app.config.ts b/apps/mobile/app.config.ts
+index a868851d5c..0e1752f187 100644
+--- a/apps/mobile/app.config.ts
++++ b/apps/mobile/app.config.ts
+@@ -19,11 +19,8 @@ const runtimeVersionPolicy =
+ const personalTeamBundleIdentifier = repoEnv.T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID?.trim();
+ const IOS_BUNDLE_IDENTIFIER_PATTERN = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
+ 
+-// Compiled into the native project. Without a relay, Observe's native side could dispatch to
+-// Expo's own ingest before observe.ts turns it off; `.invalid` never resolves (RFC 6761).
+-const observeEndpointUrl = repoEnv.T3CODE_RELAY_URL?.trim()
+-  ? new URL("/v1/mobile/observe", repoEnv.T3CODE_RELAY_URL.trim()).toString()
+-  : "https://observe.invalid";
++// Defense in depth; expo-observe is also excluded from native autolinking and JS imports.
++const observeEndpointUrl = "https://observe.invalid";
+ 
+ const fromRepoRoot = (relativePath: string) => `../../${relativePath}`;
+ const androidAdaptiveForeground = "./assets/android-icon-foreground.png";
+diff --git a/apps/mobile/package.json b/apps/mobile/package.json
+index c7342ef775..5783a83310 100644
+--- a/apps/mobile/package.json
++++ b/apps/mobile/package.json
+@@ -175,6 +175,9 @@
+       ]
+     },
+     "autolinking": {
++      "exclude": [
++        "expo-observe"
++      ],
+       "buildFromSource": [
+         "@expo/ui",
+         "expo-ui",
+diff --git a/apps/mobile/src/components/RenderErrorBoundary.tsx b/apps/mobile/src/components/RenderErrorBoundary.tsx
+index aea8cdc090..d2405bfbec 100644
+--- a/apps/mobile/src/components/RenderErrorBoundary.tsx
++++ b/apps/mobile/src/components/RenderErrorBoundary.tsx
+@@ -1,4 +1,4 @@
+-import { Observe } from "expo-observe";
++import { Observe } from "../features/observability/observe";
+ import { T, useGT } from "gt-react-native";
+ import { Component, type ReactNode } from "react";
+ import { ScrollView, View } from "react-native";
+diff --git a/apps/mobile/src/features/cloud/CloudAuthProvider.tsx b/apps/mobile/src/features/cloud/CloudAuthProvider.tsx
+index df20ef805c..e9ebd398ea 100644
+--- a/apps/mobile/src/features/cloud/CloudAuthProvider.tsx
++++ b/apps/mobile/src/features/cloud/CloudAuthProvider.tsx
+@@ -25,7 +25,7 @@ export function CloudAuthProvider(props: { readonly children: ReactNode }) {
+   }
+ 
+   return (
+-    <ClerkProvider publishableKey={publishableKey} tokenCache={tokenCache}>
++    <ClerkProvider telemetry={false} publishableKey={publishableKey} tokenCache={tokenCache}>
+       {props.children}
+     </ClerkProvider>
+   );
+diff --git a/apps/mobile/src/features/observability/diagnosticsSetting.ts b/apps/mobile/src/features/observability/diagnosticsSetting.ts
+index 175a45a0e8..3a65ae86b7 100644
+--- a/apps/mobile/src/features/observability/diagnosticsSetting.ts
++++ b/apps/mobile/src/features/observability/diagnosticsSetting.ts
+@@ -1,19 +1,2 @@
+-// Start off until the saved connection-traces preference loads.
+-let sending = false;
+-let changedSinceLoad = false;
+-
+-export const connectionTracesEnabled = () => sending;
+-export function setConnectionTracesEnabled(enabled: boolean): void {
+-  changedSinceLoad = true;
+-  sending = enabled;
+-}
+-
+-// Imported lazily so the persistence graph never runs ahead of the imports `index.ts` orders first.
+-void import("../../persistence/imperative")
+-  .then(({ loadPreferences }) => loadPreferences())
+-  .then((preferences) => {
+-    if (!changedSinceLoad) sending = preferences.connectionTracesEnabled !== false;
+-  })
+-  .catch((error: unknown) => {
+-    console.warn("[tracing] could not read the connection traces setting", error);
+-  });
++export const connectionTracesEnabled = (): boolean => false;
++export function setConnectionTracesEnabled(_enabled: boolean): void {}
+diff --git a/apps/mobile/src/features/observability/noTelemetry.test.ts b/apps/mobile/src/features/observability/noTelemetry.test.ts
+new file mode 100644
+index 0000000000..0f1745615c
+--- /dev/null
++++ b/apps/mobile/src/features/observability/noTelemetry.test.ts
+@@ -0,0 +1,11 @@
++import { expect, it } from "vite-plus/test";
++import { crashReportingAvailable, Observe, setCrashReportsEnabled } from "./observe";
++import { connectionTracesEnabled, setConnectionTracesEnabled } from "./diagnosticsSetting";
++
++it("never enables mobile crash reports or connection traces", async () => {
++  await setCrashReportsEnabled(true);
++  setConnectionTracesEnabled(true);
++  Observe.reportError(new Error("private"));
++  expect(crashReportingAvailable).toBe(false);
++  expect(connectionTracesEnabled()).toBe(false);
++});
+diff --git a/apps/mobile/src/features/observability/observe.ts b/apps/mobile/src/features/observability/observe.ts
+index fbbb5e22b8..2b33757ea0 100644
+--- a/apps/mobile/src/features/observability/observe.ts
++++ b/apps/mobile/src/features/observability/observe.ts
+@@ -1,63 +1,5 @@
+-import Constants from "expo-constants";
+-import { Observe } from "expo-observe";
++export const crashReportingAvailable = false;
+ 
+-// Importing expo-observe installs its global JS error handler; reports leave only through the relay.
+-const relayUrl: unknown = Constants.expoConfig?.extra?.relay?.url;
+-const appVariant: unknown = Constants.expoConfig?.extra?.appVariant;
++export async function setCrashReportsEnabled(_enabled: boolean): Promise<void> {}
+ 
+-export const crashReportingAvailable = typeof relayUrl === "string" && relayUrl.trim() !== "";
+-
+-interface PromiseRejectionTracker {
+-  readonly enablePromiseRejectionTracker?: (options: {
+-    readonly allRejections: boolean;
+-    readonly onUnhandled: (id: number, rejection: unknown) => void;
+-  }) => void;
+-}
+-
+-// React Native tracks unhandled rejections only in development, for LogBox; Observe has no hook.
+-if (!__DEV__) {
+-  const hermes: PromiseRejectionTracker | undefined = Reflect.get(globalThis, "HermesInternal");
+-  hermes?.enablePromiseRejectionTracker?.({
+-    allRejections: true,
+-    onUnhandled: (_id, rejection) => Observe.reportError(rejection),
+-  });
+-}
+-
+-let latestConfiguration = 0;
+-
+-// While sending is off, a dispatch pass drops what it finds, so one runs before turning it back on.
+-// Best effort: Observe skips the pass while it is backing off from a failed send.
+-export async function setCrashReportsEnabled(enabled: boolean) {
+-  const configuration = ++latestConfiguration;
+-  const dispatchingEnabled = crashReportingAvailable && enabled;
+-  if (dispatchingEnabled) {
+-    await Observe.dispatchEvents();
+-    if (configuration !== latestConfiguration) return;
+-  }
+-  Observe.configure({
+-    dispatchingEnabled,
+-    ...(typeof appVariant === "string" ? { environment: appVariant } : {}),
+-  });
+-}
+-
+-if (!crashReportingAvailable) {
+-  void setCrashReportsEnabled(false);
+-} else {
+-  // Observe keeps its last configuration across launches; configuring it off while the setting
+-  // loads would drop the last session's native crash. Imported lazily so the persistence graph
+-  // never runs ahead of the imports `index.ts` orders first.
+-  const changedSinceLoad = () => latestConfiguration !== 0;
+-  void import("../../persistence/imperative")
+-    .then(({ loadPreferences }) => loadPreferences())
+-    .then(
+-      (preferences) =>
+-        changedSinceLoad()
+-          ? undefined
+-          : setCrashReportsEnabled(preferences.crashReportsEnabled !== false),
+-      // Observe keeps the last choice it was given, which stands in for the unreadable one.
+-      (error: unknown) => console.warn("[observe] could not read the crash report setting", error),
+-    )
+-    .catch((error: unknown) => {
+-      console.warn("[observe] could not apply the crash report setting", error);
+-    });
+-}
++export const Observe = { reportError: (_error: unknown): void => {} };
+diff --git a/apps/mobile/src/features/observability/tracing.test.ts b/apps/mobile/src/features/observability/tracing.test.ts
+index 404d8e88b2..9d4ce3a1b4 100644
+--- a/apps/mobile/src/features/observability/tracing.test.ts
++++ b/apps/mobile/src/features/observability/tracing.test.ts
+@@ -57,11 +57,7 @@ it.effect.each([false, true])("gates relay sends and preserves typed failures (%
+     Effect.scoped,
+     Effect.andThen(
+       Effect.sync(() => {
+-        expect(fetchFn).toHaveBeenCalledTimes(Number(enabled));
+-        if (!enabled) return;
+-        expect(new TextDecoder().decode(fetchFn.mock.calls[0]?.[1]?.body as Uint8Array)).toContain(
+-          "mobile.test.failed-span",
+-        );
++        expect(fetchFn).not.toHaveBeenCalled();
+       }),
+     ),
+   );
+diff --git a/apps/mobile/src/features/observability/tracing.ts b/apps/mobile/src/features/observability/tracing.ts
+index 690fe34a20..7d482f5a58 100644
+--- a/apps/mobile/src/features/observability/tracing.ts
++++ b/apps/mobile/src/features/observability/tracing.ts
+@@ -1,3 +1,4 @@
++import { telemetryDisabled } from "@t3tools/shared/otelEnvironment";
+ import Constants from "expo-constants";
+ import { type ReleaseChannel, releaseResourceAttributes } from "@t3tools/shared/releaseResource";
+ import * as RelayTracing from "@t3tools/shared/relayTracing";
+@@ -24,6 +25,7 @@ const RELEASE_CHANNEL_BY_VARIANT: Readonly<Record<string, ReleaseChannel | undef
+ };
+ 
+ export function resolveTracingConfig(): TracingConfig | null {
++  if (telemetryDisabled()) return null;
+   const config = resolveCloudPublicConfig();
+   if (!hasTracingPublicConfig(config)) {
+     return null;
+diff --git a/apps/server/src/http.ts b/apps/server/src/http.ts
+index 258a99887e..9dc18867c8 100644
+--- a/apps/server/src/http.ts
++++ b/apps/server/src/http.ts
+@@ -1,3 +1,4 @@
++import { telemetryDisabled } from "@t3tools/shared/otelEnvironment";
+ import * as Mime from "effect/http/Mime";
+ import {
+   AuthOrchestrationOperateScope,
+@@ -464,7 +465,7 @@ export const layerOtlpTracesProxyRoute = HttpRouter.add(
+       Effect.catch((cause) => Effect.logWarning("Failed to decode browser OTLP traces", { cause })),
+     );
+ 
+-    if (otlpTracesUrl === undefined) {
++    if (telemetryDisabled() || otlpTracesUrl === undefined) {
+       return HttpServerResponse.empty({ status: 204 });
+     }
+ 
+diff --git a/apps/server/src/observability/Observability.ts b/apps/server/src/observability/Observability.ts
+index 1b0414e43b..79ccb5912a 100644
+--- a/apps/server/src/observability/Observability.ts
++++ b/apps/server/src/observability/Observability.ts
+@@ -55,7 +55,7 @@ export const layer = Layer.unwrap(
+             }),
+         });
+         const delegate =
+-          config.otlpTracesUrl === undefined
++          OtelEnvironment.telemetryDisabled() || config.otlpTracesUrl === undefined
+             ? undefined
+             : yield* OtlpTracer.make({
+                 url: config.otlpTracesUrl,
+@@ -84,7 +84,7 @@ export const layer = Layer.unwrap(
+     ).pipe(Layer.provide(OtlpExporter.layerFlusher), Layer.provideMerge(layerSerialization));
+ 
+     const metricsLayer =
+-      config.otlpMetricsUrl === undefined
++      OtelEnvironment.telemetryDisabled() || config.otlpMetricsUrl === undefined
+         ? Layer.empty
+         : OtlpMetrics.layer({
+             url: config.otlpMetricsUrl,
+diff --git a/apps/server/src/observability/OtlpEndpointCheck.test.ts b/apps/server/src/observability/OtlpEndpointCheck.test.ts
+index a197c55ae9..7ef076b868 100644
+--- a/apps/server/src/observability/OtlpEndpointCheck.test.ts
++++ b/apps/server/src/observability/OtlpEndpointCheck.test.ts
+@@ -1,21 +1,10 @@
+-import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
+ import * as NodeServices from "@effect/platform-node/NodeServices";
+ import { assert, it } from "@effect/vitest";
+ import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
+ import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
+ import * as Effect from "effect/Effect";
+ import * as Layer from "effect/Layer";
+-import * as Tracer from "effect/Tracer";
+-import * as NetAddress from "effect/net/NetAddress";
+-import {
+-  FetchHttpClient,
+-  HttpClient,
+-  HttpClientError,
+-  HttpClientResponse,
+-  HttpServer,
+-  HttpServerRequest,
+-  HttpServerResponse,
+-} from "effect/http";
++import { HttpClient, HttpClientError, HttpClientResponse } from "effect/http";
+ import { describe } from "vite-plus/test";
+ 
+ import * as ServerConfig from "../config.ts";
+@@ -71,136 +60,33 @@ const check = (input: Parameters<OtlpEndpointCheck.OtlpEndpointCheck["Service"][
+   });
+ 
+ describe("OtlpEndpointCheck", () => {
+-  it.effect("keeps T3 credentials paired with each running signal endpoint", () => {
+-    const signalExport = { ...DEFAULT_SIGNAL_EXPORT, headers: { "x-api-key": "secret" } };
+-    const { requests, layer } = checkWith(200, {
+-      otlpTracesUrl: "https://collector.example.com/v1/traces",
+-      otlpMetricsUrl: "https://collector.example.com/v1/metrics",
+-      otlpLogsUrl: "https://collector.example.com/v1/logs",
+-      otlpTracesExport: signalExport,
+-      otlpMetricsExport: signalExport,
+-      otlpLogsExport: signalExport,
+-      otelEnvironment: OtelEnvironment.none,
+-    });
+-    return Effect.gen(function* () {
+-      for (const signal of ["traces", "metrics", "logs"] as const) {
+-        const runningUrl = `https://collector.example.com/v1/${signal}`;
+-        yield* check({ signal, url: runningUrl });
+-        yield* check({ signal, url: "https://elsewhere.example.com/collect" });
+-        yield* check({ signal, url: `${runningUrl}/other` });
+-        yield* check({ signal, url: `${runningUrl}?tenant=other` });
+-      }
+-
+-      assert.lengthOf(requests, 12);
+-      requests.forEach((request, index) => {
+-        if (index % 4 === 0) assert.strictEqual(request.headers["x-api-key"], "secret");
+-        else assert.isUndefined(request.headers["x-api-key"]);
++  it.effect(
++    "never probes any endpoint, including explicitly configured endpoints with credentials",
++    () => {
++      const signalExport = { ...DEFAULT_SIGNAL_EXPORT, headers: { "x-api-key": "secret" } };
++      const { requests, layer } = checkWith(200, {
++        otlpTracesUrl: "https://collector.example/v1/traces",
++        otlpMetricsUrl: "https://collector.example/v1/metrics",
++        otlpLogsUrl: "https://collector.example/v1/logs",
++        otlpTracesExport: signalExport,
++        otlpMetricsExport: signalExport,
++        otlpLogsExport: signalExport,
++        otelEnvironment: { ...OtelEnvironment.none, disabled: false },
+       });
+-    }).pipe(Effect.provide(layer));
+-  });
+-
+-  it.effect("does not send export credentials when the signal has no running endpoint", () => {
+-    const { requests, layer } = checkWith(200, {
+-      otlpLogsUrl: undefined,
+-      otlpLogsExport: { ...DEFAULT_SIGNAL_EXPORT, headers: { authorization: "Bearer t3" } },
+-      otelEnvironment: OtelEnvironment.none,
+-    });
+-    return Effect.gen(function* () {
+-      const result = yield* check({ signal: "logs", url: "https://new.example.com/v1/logs" });
+-
+-      assert.strictEqual(result._tag, "Accepted");
+-      assert.lengthOf(requests, 1);
+-      assert.isUndefined(requests[0]?.headers.authorization);
+-    }).pipe(Effect.provide(layer));
+-  });
+-
+-  it.effect("keeps endpoint URLs and credentials out of traces", () => {
+-    const url = "https://collector.example.com/v1/logs?api_key=query-secret";
+-    const { requests, layer } = checkWith(200, {
+-      otlpLogsUrl: url,
+-      otlpLogsExport: {
+-        ...DEFAULT_SIGNAL_EXPORT,
+-        headers: { "x-honeycomb-team": "header-secret" },
+-      },
+-      otelEnvironment: OtelEnvironment.none,
+-    });
+-    const recorded: Array<unknown> = [];
+-    const tracer = Tracer.make({
+-      span: (options) => {
+-        const span = new Tracer.NativeSpan(options);
+-        const end = span.end.bind(span);
+-        span.end = (endTime, exit) => {
+-          end(endTime, exit);
+-          recorded.push({ name: span.name, attributes: Object.fromEntries(span.attributes) });
+-        };
+-        return span;
+-      },
+-    });
+-    return Effect.gen(function* () {
+-      yield* check({ signal: "logs", url }).pipe(Effect.withTracer(tracer));
+-
+-      assert.strictEqual(requests[0]?.headers["x-honeycomb-team"], "header-secret");
+-      assert.notInclude(JSON.stringify(recorded), "secret");
+-    }).pipe(Effect.provide(layer));
+-  });
+-
+-  it.effect("does not forward credentials through a receiver redirect", () =>
+-    Effect.scoped(
+-      Effect.gen(function* () {
+-        const requests: Array<{ url: string; apiKey: string | undefined }> = [];
+-        const server = yield* HttpServer.HttpServer;
+-        yield* server.serve(
+-          Effect.gen(function* () {
+-            const request = yield* HttpServerRequest.HttpServerRequest;
+-            yield* request.text;
+-            requests.push({ url: request.url, apiKey: request.headers["x-api-key"] });
+-            return request.url === "/v1/traces"
+-              ? HttpServerResponse.redirect("/other", { status: 307 })
+-              : HttpServerResponse.empty({ status: 200 });
+-          }),
+-        );
+-        if (!NetAddress.isInetAddress(server.address)) {
+-          return yield* Effect.die(new Error("Expected a TCP address"));
++      return Effect.gen(function* () {
++        for (const signal of ["traces", "metrics", "logs"] as const) {
++          for (const url of [
++            `https://collector.example/v1/${signal}`,
++            "https://other.example/collect",
++          ]) {
++            assert.deepStrictEqual(yield* check({ signal, url }), {
++              _tag: "Unreachable",
++              timedOut: false,
++            });
++          }
+         }
+-        const url = `http://127.0.0.1:${server.address.port}/v1/traces`;
+-        const { layer } = checkWith(
+-          200,
+-          {
+-            otlpTracesUrl: url,
+-            otlpTracesExport: { ...DEFAULT_SIGNAL_EXPORT, headers: { "x-api-key": "secret" } },
+-          },
+-          FetchHttpClient.layer,
+-        );
+-        const result = yield* check({ signal: "traces", url }).pipe(Effect.provide(layer));
+-
+-        assert.deepStrictEqual(result, { _tag: "Rejected", status: 307 });
+-        assert.deepStrictEqual(requests, [{ url: "/v1/traces", apiKey: "secret" }]);
+-      }),
+-    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
++        assert.lengthOf(requests, 0);
++      }).pipe(Effect.provide(layer));
++    },
+   );
+-
+-  it.effect("keeps OTEL endpoint credentials off other endpoints", () => {
+-    const otelUrl = "https://otel.example.com/v1/traces";
+-    const otelExport = { ...DEFAULT_SIGNAL_EXPORT, headers: { "x-api-key": "secret" } };
+-    const { requests, layer } = checkWith(200, {
+-      otlpTracesUrl: otelUrl,
+-      otlpTracesExport: otelExport,
+-      otelEnvironment: {
+-        ...OtelEnvironment.none,
+-        traces: OtelEnvironment.OtelSignal.Export({
+-          url: otelUrl,
+-          variable: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+-          protocol: otelExport.protocol,
+-          headers: otelExport.headers,
+-        }),
+-      },
+-    });
+-    return Effect.gen(function* () {
+-      yield* check({ signal: "traces", url: otelUrl });
+-      yield* check({ signal: "traces", url: "https://elsewhere.example.com/v1/traces" });
+-
+-      assert.strictEqual(requests[0]?.headers["x-api-key"], "secret");
+-      assert.isUndefined(requests[1]?.headers["x-api-key"]);
+-    }).pipe(Effect.provide(layer));
+-  });
+ });
+diff --git a/apps/server/src/observability/OtlpEndpointCheck.ts b/apps/server/src/observability/OtlpEndpointCheck.ts
+index cb764f4557..5322e8b55d 100644
+--- a/apps/server/src/observability/OtlpEndpointCheck.ts
++++ b/apps/server/src/observability/OtlpEndpointCheck.ts
+@@ -1,3 +1,4 @@
++import { telemetryDisabled } from "@t3tools/shared/otelEnvironment";
+ import type {
+   OtlpEndpointCheckInput,
+   OtlpEndpointCheckResult,
+@@ -51,6 +52,7 @@ const make = Effect.gen(function* () {
+     signal,
+     url,
+   }: OtlpEndpointCheckInput) {
++    if (telemetryDisabled()) return { _tag: "Unreachable", timedOut: false } as const;
+     const { url: runningUrl, export: signalExport } = running[signal];
+     const headers = url === runningUrl ? signalExport.headers : undefined;
+     const body = yield* Effect.gen(function* () {
+diff --git a/apps/server/src/serverLogger.ts b/apps/server/src/serverLogger.ts
+index 4458c717e1..5f1dd35fd4 100644
+--- a/apps/server/src/serverLogger.ts
++++ b/apps/server/src/serverLogger.ts
+@@ -1,3 +1,4 @@
++import { telemetryDisabled } from "@t3tools/shared/otelEnvironment";
+ import * as HostProcess from "@t3tools/shared/HostProcess";
+ import * as SharedObservability from "@t3tools/shared/observability";
+ import * as Cause from "effect/Cause";
+@@ -56,7 +57,7 @@ export const layer = Effect.gen(function* () {
+ 
+   const logs = config.otlpLogsExport;
+   const otlpLogger =
+-    config.otlpLogsUrl === undefined
++    telemetryDisabled() || config.otlpLogsUrl === undefined
+       ? undefined
+       : OtlpLogger.make({
+           url: config.otlpLogsUrl,
+diff --git a/apps/server/src/serverRuntimeStartup.ts b/apps/server/src/serverRuntimeStartup.ts
+index 0f5c52478b..65c12697cb 100644
+--- a/apps/server/src/serverRuntimeStartup.ts
++++ b/apps/server/src/serverRuntimeStartup.ts
+@@ -46,7 +46,6 @@ import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
+ import * as ServerSettings from "./serverSettings.ts";
+ import { forkParked, forkParkedFiber } from "./serverActivation.ts";
+ import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
+-import { getServerOwners } from "./telemetry/Identify.ts";
+ import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
+ import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
+ import {
+@@ -175,7 +174,6 @@ const recordStartupHeartbeat = Effect.gen(function* () {
+     threadCount,
+     projectCount,
+   });
+-  yield* analytics.recordOwners(yield* getServerOwners, "server");
+ });
+ 
+ const getAutoBootstrapThreadModelSelection = (): ModelSelection => ({
+diff --git a/apps/server/src/telemetry/AnalyticsService.test.ts b/apps/server/src/telemetry/AnalyticsService.test.ts
+index 8fe1698f47..528921f3a7 100644
+--- a/apps/server/src/telemetry/AnalyticsService.test.ts
++++ b/apps/server/src/telemetry/AnalyticsService.test.ts
+@@ -1,506 +1,22 @@
+-import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
+-import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+-import * as NodeServices from "@effect/platform-node/NodeServices";
+-import { assert, it } from "@effect/vitest";
+-import * as Clock from "effect/Clock";
++import { expect, it } from "@effect/vitest";
+ import * as ConfigProvider from "effect/ConfigProvider";
+ import * as Effect from "effect/Effect";
+-import * as Exit from "effect/Exit";
+-import * as Fiber from "effect/Fiber";
+-import * as Layer from "effect/Layer";
+-import * as Schema from "effect/Schema";
+-import * as Scope from "effect/Scope";
+-import * as TestClock from "effect/testing/TestClock";
+-import * as HttpClient from "effect/http/HttpClient";
+-import * as HttpClientError from "effect/http/HttpClientError";
+-import * as HttpClientRequest from "effect/http/HttpClientRequest";
+-import * as HttpClientResponse from "effect/http/HttpClientResponse";
+-import * as HttpServer from "effect/http/HttpServer";
+-import * as HttpServerRequest from "effect/http/HttpServerRequest";
+-import * as HttpServerResponse from "effect/http/HttpServerResponse";
+-import * as HostProcess from "@t3tools/shared/HostProcess";
+-
+-import type { ManagedPolicyDocument } from "@t3tools/contracts";
+-
+-import * as ServerConfig from "../config.ts";
+-import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
+-import { getTelemetryIdentity } from "./Identify.ts";
+-import * as AnalyticsService from "./AnalyticsService.ts";
+-
+-interface RecordedBatchRequest {
+-  readonly path: string;
+-  readonly body: {
+-    readonly batch?: ReadonlyArray<{
+-      readonly event?: string;
+-      readonly properties?: {
+-        readonly index?: number;
+-        readonly clientType?: string;
+-        readonly serverOs?: string;
+-        readonly serverArch?: string;
+-        readonly serverAppVersion?: string;
+-        readonly serverMode?: string;
+-        readonly t3CodeVersion?: string;
+-      };
+-    }>;
+-  } | null;
+-}
+-
+-interface RecordedBatchBody {
+-  readonly batch: ReadonlyArray<{
+-    readonly event?: string;
+-    readonly properties?: {
+-      readonly index?: number;
+-      readonly clientType?: string;
+-      readonly serverOs?: string;
+-      readonly serverArch?: string;
+-      readonly serverAppVersion?: string;
+-      readonly serverMode?: string;
+-      readonly t3CodeVersion?: string;
+-    };
+-  }>;
+-}
+-
+-const SentBatch = Schema.fromJsonString(
+-  Schema.Struct({
+-    batch: Schema.Array(
+-      Schema.Struct({
+-        uuid: Schema.String,
+-        event: Schema.String,
+-        distinct_id: Schema.String,
+-        properties: Schema.Struct({
+-          telemetryChannel: Schema.String,
+-          installId: Schema.optionalKey(Schema.String),
+-          serverOs: Schema.optionalKey(Schema.String),
+-          ownerSource: Schema.optionalKey(Schema.String),
+-          observedBy: Schema.optionalKey(Schema.String),
+-        }),
+-      }),
+-    ),
+-  }),
+-);
+-const decodeSentBatch = Schema.decodeEffect(SentBatch);
+-type SentEvent = (typeof SentBatch.Type)["batch"][number];
+-type Respond = (
+-  request: HttpClientRequest.HttpClientRequest,
+-) => Effect.Effect<HttpClientResponse.HttpClientResponse, HttpClientError.HttpClientError>;
+-
+-const respondWithStatus =
+-  (status: number): Respond =>
+-  (request) =>
+-    Effect.succeed(HttpClientResponse.fromWeb(request, new Response(null, { status })));
+-
+-/**
+- * Answers 503 for `minutes` after the first send, then 204. `answers` holds each
+- * answer with its time in ms after the first send (the test clock runs on across tests).
+- */
+-const failingFor = (minutes: number) => {
+-  const answers: Array<{ readonly at: number; readonly status: number }> = [];
+-  let firstSend: number | undefined;
+-  const respond: Respond = (request) =>
+-    Effect.flatMap(Clock.currentTimeMillis, (now) => {
+-      firstSend ??= now;
+-      const at = now - firstSend;
+-      const status = at < minutes * 60_000 ? 503 : 204;
+-      answers.push({ at, status });
+-      return respondWithStatus(status)(request);
+-    });
+-  return { respond, answers };
+-};
+-
+-const recordTwentyEvents = Effect.gen(function* () {
+-  const analytics = yield* AnalyticsService.AnalyticsService;
+-  for (let index = 0; index < 20; index += 1) {
+-    yield* analytics.record("test.retry", { index });
+-  }
+-});
+-
+-const analyticsLayerWith = (
+-  client: HttpClient.HttpClient,
+-  policy?: ManagedPolicyDocument,
+-  telemetryEnv: { readonly T3CODE_TELEMETRY_ENABLED?: boolean } = {
+-    T3CODE_TELEMETRY_ENABLED: true,
+-  },
+-) =>
+-  AnalyticsService.layer.pipe(
+-    Layer.provideMerge(
+-      ServerConfig.ServerConfig.layerTest(process.cwd(), { prefix: "t3-telemetry-retry-" }),
+-    ),
+-    Layer.provide(
+-      ConfigProvider.layer(
+-        ConfigProvider.fromUnknown({
+-          ...telemetryEnv,
+-          T3CODE_POSTHOG_KEY: "phc_test_key",
+-          T3CODE_POSTHOG_HOST: "http://localhost",
+-        }),
+-      ),
+-    ),
+-    Layer.provide(
+-      Layer.mergeAll(
+-        Layer.succeed(HostProcess.Platform, "win32"),
+-        Layer.succeed(HostProcess.Architecture, "x64"),
+-        Layer.succeed(HttpClient.HttpClient, client),
+-        ManagedPolicy.layerTest(policy),
++import * as Analytics from "./AnalyticsService.ts";
++
++it.effect(
++  "drops ordinary, feedback and owner events without acquiring identity or HTTP services",
++  () =>
++    Effect.gen(function* () {
++      const analytics = yield* Analytics.make;
++      expect(yield* analytics.record("client.turn.requested", { model: "test" })).toBe(false);
++      expect(
++        yield* analytics.record("agent.feedback", { expected: "private" }, { anonymous: true }),
++      ).toBe(false);
++      yield* analytics.recordOwners([], "client");
++      yield* analytics.flush;
++    }).pipe(
++      Effect.provide(
++        ConfigProvider.layer(ConfigProvider.fromEnvRecord({ T3CODE_TELEMETRY_ENABLED: "true" })),
+       ),
+     ),
+-  );
+-
+-/**
+- * Runs `record` (20 events by default), then lets `minutes` of background
+- * flushes run against a client that answers every send with `respond`.
+- * Returns the sent batches.
+- */
+-const sendFor = (
+-  minutes: number,
+-  respond: Respond,
+-  record: Effect.Effect<
+-    void,
+-    never,
+-    AnalyticsService.AnalyticsService | Effect.Services<typeof getTelemetryIdentity>
+-  > = recordTwentyEvents,
+-  policy?: ManagedPolicyDocument,
+-  telemetryEnv?: Parameters<typeof analyticsLayerWith>[2],
+-) =>
+-  Effect.gen(function* () {
+-    const batches: Array<ReadonlyArray<SentEvent>> = [];
+-    const client = HttpClient.make((request) =>
+-      Effect.gen(function* () {
+-        if (request.body._tag === "Uint8Array") {
+-          const body = yield* decodeSentBatch(new TextDecoder().decode(request.body.body)).pipe(
+-            Effect.orDie,
+-          );
+-          batches.push(body.batch);
+-        }
+-        return yield* respond(request);
+-      }),
+-    );
+-    const runtimeLayer = analyticsLayerWith(client, policy, telemetryEnv);
+-
+-    yield* Effect.gen(function* () {
+-      yield* record;
+-      for (let second = 0; second < minutes * 60; second += 1) {
+-        yield* TestClock.adjust("1 second");
+-      }
+-    }).pipe(Effect.provide(runtimeLayer));
+-    return batches;
+-  });
+-
+-it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AnalyticsService test", (it) => {
+-  it.effect("waits for desktop shell consent and honors a late telemetry opt-out", () =>
+-    Effect.gen(function* () {
+-      const env: NodeJS.ProcessEnv = { T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING: "1" };
+-      const batches = yield* sendFor(
+-        0,
+-        respondWithStatus(204),
+-        Effect.gen(function* () {
+-          const analytics = yield* AnalyticsService.AnalyticsService;
+-          yield* analytics.record("test.before-discovery");
+-          yield* analytics.flush;
+-          env.T3CODE_TELEMETRY_ENABLED = "false";
+-          delete env.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING;
+-          yield* analytics.record("test.opted-out");
+-          yield* analytics.flush;
+-          env.T3CODE_TELEMETRY_ENABLED = "true";
+-          yield* analytics.record("test.allowed");
+-          yield* analytics.flush;
+-        }),
+-      ).pipe(Effect.provideService(HostProcess.Environment, env));
+-      assert.deepEqual(
+-        batches.flat().map((event) => event.event),
+-        ["test.allowed"],
+-      );
+-    }),
+-  );
+-
+-  it.effect("sends nothing while DO_NOT_TRACK is set", () =>
+-    Effect.gen(function* () {
+-      const env: NodeJS.ProcessEnv = { DO_NOT_TRACK: "1" };
+-      const batches = yield* sendFor(
+-        0,
+-        respondWithStatus(204),
+-        Effect.gen(function* () {
+-          const analytics = yield* AnalyticsService.AnalyticsService;
+-          yield* analytics.record("test.do-not-track");
+-          yield* analytics.flush;
+-          env.DO_NOT_TRACK = "0";
+-          yield* analytics.record("test.allowed");
+-          yield* analytics.flush;
+-        }),
+-      ).pipe(Effect.provideService(HostProcess.Environment, env));
+-      assert.deepEqual(
+-        batches.flat().map((event) => event.event),
+-        ["test.allowed"],
+-      );
+-    }),
+-  );
+-
+-  it.effect("sends an anonymous event under its own id and without the install id", () =>
+-    Effect.gen(function* () {
+-      const batches = yield* sendFor(
+-        0,
+-        respondWithStatus(204),
+-        Effect.gen(function* () {
+-          const analytics = yield* AnalyticsService.AnalyticsService;
+-          yield* analytics.record("test.linked");
+-          yield* analytics.record("test.anonymous", {}, { anonymous: true });
+-          yield* analytics.flush;
+-        }),
+-      );
+-      assert.equal(batches.length, 2);
+-      const [linked, anonymous] = batches.map(([event]) => event);
+-
+-      assert.isDefined(linked?.properties.installId);
+-      assert.isDefined(linked?.properties.serverOs);
+-      assert.equal(anonymous?.distinct_id, anonymous?.uuid);
+-      assert.notEqual(anonymous?.distinct_id, linked?.distinct_id);
+-      assert.isUndefined(anonymous?.properties.installId);
+-      assert.isUndefined(anonymous?.properties.serverOs);
+-    }),
+-  );
+-
+-  it.effect("client owner reports cannot use up the server's owner cap", () =>
+-    Effect.gen(function* () {
+-      const batches = yield* sendFor(
+-        10,
+-        respondWithStatus(204),
+-        Effect.gen(function* () {
+-          const analytics = yield* AnalyticsService.AnalyticsService;
+-          yield* analytics.recordOwners(
+-            Array.from({ length: 1_001 }, (_, index) => ({
+-              source: "device" as const,
+-              ownerId: index.toString(16).padStart(64, "0"),
+-            })),
+-            "client",
+-          );
+-          // The event buffer also holds 1,000, so send the client events first.
+-          yield* analytics.flush;
+-          yield* analytics.recordOwners([{ source: "connect", ownerId: "a".repeat(64) }], "server");
+-        }),
+-      );
+-      const owners = batches.flat().map((event) => event.properties.observedBy);
+-
+-      assert.equal(owners.filter((observedBy) => observedBy === "client").length, 1_000);
+-      assert.equal(owners.filter((observedBy) => observedBy === "server").length, 1);
+-    }),
+-  );
+-
+-  it.effect("keeps a failed batch through a 20-minute outage and sends it once after", () =>
+-    Effect.gen(function* () {
+-      const ingest = failingFor(20);
+-      const batches = yield* sendFor(40, ingest.respond);
+-      const statuses = ingest.answers.map(({ status }) => status);
+-      assert.equal(statuses.at(-1), 204);
+-      assert.equal(statuses.filter((status) => status === 204).length, 1);
+-      const sentUuids = new Set(batches.map((batch) => batch.map(({ uuid }) => uuid).join()));
+-      assert.equal(sentUuids.size, 1);
+-      assert.equal(batches[0]?.length, 20);
+-    }),
+-  );
+-
+-  it.effect("drops a batch that keeps failing for 30 minutes", () =>
+-    Effect.gen(function* () {
+-      const ingest = failingFor(Infinity);
+-      yield* sendFor(60, ingest.respond);
+-      const lastSend = ingest.answers.at(-1)?.at ?? 0;
+-      assert.isAtLeast(lastSend, 30 * 60_000);
+-      assert.isBelow(lastSend, 36 * 60_000);
+-    }),
+-  );
+-
+-  it.effect(
+-    "sends nothing when a managed policy turns telemetry off, despite the environment",
+-    () =>
+-      Effect.gen(function* () {
+-        const policy = { schemaVersion: 1, organization: "Example Corp" } as const;
+-        const allowed = yield* sendFor(1, respondWithStatus(204), recordTwentyEvents, {
+-          ...policy,
+-          limits: { telemetry: true },
+-        });
+-        assert.equal(allowed.length, 1);
+-        const denied = yield* sendFor(1, respondWithStatus(204), recordTwentyEvents, {
+-          ...policy,
+-          limits: { telemetry: false },
+-        });
+-        assert.deepEqual(denied, []);
+-      }),
+-  );
+-
+-  it.effect("sends nothing on a CI runner unless the environment opts in", () =>
+-    Effect.gen(function* () {
+-      const onCi = (telemetryEnv: Parameters<typeof analyticsLayerWith>[2]) =>
+-        sendFor(1, respondWithStatus(204), recordTwentyEvents, undefined, telemetryEnv).pipe(
+-          Effect.provideService(HostProcess.Environment, { GITHUB_ACTIONS: "true" }),
+-        );
+-      assert.deepEqual(yield* onCi({}), []);
+-      assert.equal((yield* onCi({ T3CODE_TELEMETRY_ENABLED: true })).length, 1);
+-    }),
+-  );
+-
+-  it.effect("drops a batch the endpoint rejects without sending it again", () =>
+-    Effect.gen(function* () {
+-      const batches = yield* sendFor(10, respondWithStatus(400));
+-      assert.equal(batches.length, 1);
+-    }),
+-  );
+-
+-  it.effect("shutdown stops waiting for a telemetry endpoint that never answers", () =>
+-    Effect.gen(function* () {
+-      const scope = yield* Scope.make();
+-      const context = yield* Layer.buildWithScope(
+-        analyticsLayerWith(HttpClient.make(() => Effect.never)),
+-        scope,
+-      );
+-      yield* recordTwentyEvents.pipe(Effect.provide(context));
+-
+-      const shutdown = yield* Scope.close(scope, Exit.void).pipe(Effect.forkChild);
+-      yield* TestClock.adjust("1 second");
+-      yield* Fiber.join(shutdown);
+-    }),
+-  );
+-
+-  it.effect("flush drains all buffered events across multiple batches", () =>
+-    Effect.gen(function* () {
+-      const capturedRequests: Array<RecordedBatchRequest> = [];
+-      const layerServerConfig = ServerConfig.ServerConfig.layerTest(process.cwd(), {
+-        prefix: "t3-telemetry-base-",
+-      });
+-
+-      const layerTelemetry = AnalyticsService.layer.pipe(Layer.provideMerge(layerServerConfig));
+-      const layerConfig = ConfigProvider.layer(
+-        ConfigProvider.fromUnknown({
+-          T3CODE_TELEMETRY_ENABLED: true,
+-          T3CODE_POSTHOG_KEY: "phc_test_key",
+-          T3CODE_POSTHOG_HOST: "http://localhost",
+-          T3CODE_TELEMETRY_FLUSH_BATCH_SIZE: 20,
+-        }),
+-      );
+-      const layerBatchServer = HttpServer.serve(
+-        Effect.gen(function* () {
+-          const request = yield* HttpServerRequest.HttpServerRequest;
+-          if (request.method !== "POST") {
+-            return HttpServerResponse.empty({ status: 404 });
+-          }
+-
+-          const payload = yield* request.json.pipe(
+-            Effect.map((body) => body as RecordedBatchRequest["body"]),
+-            Effect.orElseSucceed(() => null),
+-          );
+-
+-          capturedRequests.push({ path: request.url, body: payload });
+-
+-          return HttpServerResponse.jsonUnsafe({});
+-        }),
+-      );
+-      const layerRuntime = layerTelemetry.pipe(
+-        Layer.provide(layerConfig),
+-        Layer.provide(
+-          Layer.mergeAll(
+-            Layer.succeed(HostProcess.Platform, "linux"),
+-            Layer.succeed(HostProcess.Architecture, "arm64"),
+-            ManagedPolicy.layerTest(),
+-          ),
+-        ),
+-        Layer.provideMerge(NodeHttpServer.layerTest),
+-      );
+-
+-      yield* Effect.gen(function* () {
+-        yield* Layer.launch(layerBatchServer).pipe(Effect.forkScoped);
+-        const { distinctId } = yield* getTelemetryIdentity;
+-        assert.equal(distinctId !== null, true);
+-        const analytics = yield* AnalyticsService.AnalyticsService;
+-
+-        for (let index = 0; index < 45; index += 1) {
+-          yield* analytics.record("test.flush.drain", { index });
+-        }
+-
+-        yield* analytics.flush;
+-      }).pipe(Effect.provide(layerRuntime));
+-
+-      const batchRequests = capturedRequests.filter(
+-        (request): request is RecordedBatchRequest & { readonly body: RecordedBatchBody } =>
+-          Array.isArray(request.body?.batch),
+-      );
+-      assert.equal(batchRequests.length, 3);
+-      assert.equal(
+-        batchRequests.every(
+-          (request) => request.path.endsWith("/batch/") || request.path.endsWith("/batch"),
+-        ),
+-        true,
+-      );
+-      const deliveredIndexes = batchRequests.flatMap((request) =>
+-        request.body.batch
+-          .filter((event) => event.event === "test.flush.drain")
+-          .map((event) => event.properties?.index)
+-          .filter((index): index is number => typeof index === "number"),
+-      );
+-
+-      const sorted = deliveredIndexes.toSorted((a, b) => a - b);
+-      assert.equal(sorted.length, 45);
+-      assert.deepEqual(
+-        sorted,
+-        Array.from({ length: 45 }, (_, index) => index),
+-      );
+-      assert.equal(
+-        batchRequests.every((request) =>
+-          request.body.batch.every((event) => event.properties?.clientType === "cli-web-client"),
+-        ),
+-        true,
+-      );
+-      assert.equal(
+-        batchRequests.every((request) =>
+-          request.body.batch.every(
+-            (event) =>
+-              event.properties?.serverOs === "Linux" &&
+-              event.properties.serverArch === "arm64" &&
+-              event.properties.serverAppVersion === event.properties.t3CodeVersion &&
+-              event.properties.serverMode === "web",
+-          ),
+-        ),
+-        true,
+-      );
+-    }),
+-  );
+-
+-  it.effect("does not send batch requests when telemetry is disabled", () =>
+-    Effect.gen(function* () {
+-      const capturedPaths: Array<string> = [];
+-      const layerServerConfig = ServerConfig.ServerConfig.layerTest(process.cwd(), {
+-        prefix: "t3-telemetry-disabled-",
+-      });
+-      const layerTelemetry = AnalyticsService.layer.pipe(Layer.provideMerge(layerServerConfig));
+-      const layerConfig = ConfigProvider.layer(
+-        ConfigProvider.fromUnknown({
+-          T3CODE_TELEMETRY_ENABLED: false,
+-          T3CODE_POSTHOG_KEY: "phc_test_key",
+-          T3CODE_POSTHOG_HOST: "http://localhost",
+-        }),
+-      );
+-      const layerBatchServer = HttpServer.serve(
+-        Effect.gen(function* () {
+-          const request = yield* HttpServerRequest.HttpServerRequest;
+-          capturedPaths.push(request.url);
+-          return HttpServerResponse.jsonUnsafe({});
+-        }),
+-      );
+-      const layerRuntime = layerTelemetry.pipe(
+-        Layer.provide(layerConfig),
+-        Layer.provide(
+-          Layer.mergeAll(
+-            Layer.succeed(HostProcess.Platform, "linux"),
+-            Layer.succeed(HostProcess.Architecture, "arm64"),
+-            ManagedPolicy.layerTest(),
+-          ),
+-        ),
+-        Layer.provideMerge(NodeHttpServer.layerTest),
+-      );
+-
+-      yield* Effect.gen(function* () {
+-        yield* Layer.launch(layerBatchServer).pipe(Effect.forkScoped);
+-        const analytics = yield* AnalyticsService.AnalyticsService;
+-        yield* analytics.record("test.disabled", { index: 1 });
+-        yield* analytics.flush;
+-      }).pipe(Effect.provide(layerRuntime));
+-
+-      assert.deepEqual(capturedPaths, []);
+-    }),
+-  );
+-});
++);
+diff --git a/apps/server/src/telemetry/AnalyticsService.ts b/apps/server/src/telemetry/AnalyticsService.ts
+index 3d92a317fd..ea48d7e042 100644
+--- a/apps/server/src/telemetry/AnalyticsService.ts
++++ b/apps/server/src/telemetry/AnalyticsService.ts
+@@ -1,86 +1,7 @@
+-// T3 ingest retains events and forwards to PostHog; UUIDs deduplicate retries there.
+-import * as HostProcess from "@t3tools/shared/HostProcess";
+-import { isCiEnvironment, isDoNotTrackSet } from "@t3tools/shared/otelEnvironment";
+-import type { ClientOs } from "@t3tools/contracts";
+-import * as Clock from "effect/Clock";
+-import * as Config from "effect/Config";
+-import * as ConfigProvider from "effect/ConfigProvider";
++import type { TelemetryOwner } from "./Identify.ts";
+ import * as Context from "effect/Context";
+-import * as SecureRandom from "effect/crypto/SecureRandom";
+-import * as DateTime from "effect/DateTime";
+ import * as Effect from "effect/Effect";
+-import * as Exit from "effect/Exit";
+ import * as Layer from "effect/Layer";
+-import * as Option from "effect/Option";
+-import * as Random from "effect/Random";
+-import * as Ref from "effect/Ref";
+-import * as Result from "effect/Result";
+-import * as Semaphore from "effect/Semaphore";
+-import * as HttpClient from "effect/http/HttpClient";
+-import * as HttpClientRequest from "effect/http/HttpClientRequest";
+-import * as HttpClientResponse from "effect/http/HttpClientResponse";
+-
+-import packageJson from "../../package.json" with { type: "json" };
+-import * as ServerConfig from "../config.ts";
+-import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
+-import { getTelemetryIdentity, type TelemetryOwner } from "./Identify.ts";
+-
+-interface BufferedAnalyticsEvent {
+-  readonly uuid: string;
+-  readonly event: string;
+-  readonly properties?: Readonly<Record<string, unknown>>;
+-  readonly capturedAt: string;
+-  /** Sent under its own id, without the install id, so it links to nothing else. */
+-  readonly anonymous?: true;
+-}
+-
+-interface DeliveryState {
+-  readonly failedBatch: ReadonlyArray<BufferedAnalyticsEvent>;
+-  readonly batchAttempts: number;
+-  readonly firstFailedAt: number;
+-  readonly failures: number;
+-  readonly retryAt: number;
+-}
+-
+-// Retry delays shorter than this still wait for the next background check.
+-const FLUSH_INTERVAL_MS = 10_000;
+-// A hung send would hold the flush lock for the next background flush.
+-const SEND_TIMEOUT = "10 seconds";
+-// Quit and restart wait for this flush; events it cannot send in time are dropped.
+-const SHUTDOWN_FLUSH_TIMEOUT = "1 second";
+-// A failed batch is tried again until it has failed for this long. Ingest answers 503 when it
+-// cannot store a batch, and a broken Cloudflare location can take about 5 minutes to fail over.
+-// The waiting batch holds newer events back; `maxBufferedEvents` bounds them meanwhile.
+-const MAX_BATCH_RETRY_MS = 30 * 60_000;
+-const RETRY_BASE_DELAY_MS = 2_000;
+-// Clients can report any number of owner ids; past this many per observer, new ones
+-// are not sent. Each observer has its own cap, so client reports never crowd out the
+-// server's own.
+-const MAX_RECORDED_OWNERS = 1_000;
+-const RETRY_MAX_DELAY_MS = 300_000;
+-// These statuses reject the batch itself; unlike 408/429, retrying cannot help.
+-const REJECTED_BATCH_STATUSES = new Set([400, 401, 413]);
+-
+-/** `random` is in [0, 1). */
+-function retryDelayMs(failures: number, random: number): number {
+-  const ceiling = Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS * 2 ** (failures - 1));
+-  return Math.round(ceiling / 2 + (ceiling / 2) * random);
+-}
+-
+-const TelemetryEnvConfig = Config.all({
+-  posthogKey: Config.String("T3CODE_POSTHOG_KEY").pipe(
+-    Config.withDefault("phc_XOWci4oZP4VvLiEyrFqkFjP4CZn55mjYYBMREK5Wd6m"),
+-  ),
+-  posthogHost: Config.String("T3CODE_POSTHOG_HOST").pipe(
+-    Config.withDefault("https://ingest.t3.codes"),
+-  ),
+-  enabled: Config.Boolean("T3CODE_TELEMETRY_ENABLED").pipe(Config.option),
+-  flushBatchSize: Config.Number("T3CODE_TELEMETRY_FLUSH_BATCH_SIZE").pipe(Config.withDefault(20)),
+-  maxBufferedEvents: Config.Number("T3CODE_TELEMETRY_MAX_BUFFERED_EVENTS").pipe(
+-    Config.withDefault(1_000),
+-  ),
+-  wslDistroName: Config.String("WSL_DISTRO_NAME").pipe(Config.option),
+-});
+ 
+ export class AnalyticsService extends Context.Service<
+   AnalyticsService,
+@@ -106,286 +27,13 @@ export class AnalyticsService extends Context.Service<
+   }
+ >()("t3/telemetry/AnalyticsService") {}
+ 
+-function serverOsFromNodePlatform(platform: string): ClientOs {
+-  switch (platform) {
+-    case "darwin":
+-      return "macOS";
+-    case "win32":
+-      return "Windows";
+-    case "linux":
+-      return "Linux";
+-    case "android":
+-      return "Android";
+-    default:
+-      return "other";
+-  }
+-}
+-
+-/** @public */
+-/** @public */
+-export const make = Effect.gen(function* () {
+-  const telemetryConfig = yield* TelemetryEnvConfig;
+-  const hostEnvironment = yield* HostProcess.Environment;
+-  const awaitingShellConsent = hostEnvironment.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING === "1";
+-  const enabledByDefault = !isCiEnvironment(hostEnvironment);
+-  const enabledAtStartup = Option.getOrElse(telemetryConfig.enabled, () => enabledByDefault);
+-  // A managed policy can switch analytics off over the environment, never on.
+-  const policyAllows =
+-    ManagedPolicy.deniedBy(yield* ManagedPolicy.ManagedPolicy, "telemetry") === undefined;
+-  // A cached PATH does not establish consent from the current login shell.
+-  const telemetryEnabled = Effect.suspend(() => {
+-    if (!enabledAtStartup || !policyAllows || isDoNotTrackSet(hostEnvironment))
+-      return Effect.succeed(false);
+-    if (!awaitingShellConsent) return Effect.succeed(true);
+-    if (hostEnvironment.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING === "1")
+-      return Effect.succeed(false);
+-    const preference = hostEnvironment.T3CODE_TELEMETRY_ENABLED;
+-    return Config.Boolean("T3CODE_TELEMETRY_ENABLED").pipe(
+-      Config.withDefault(enabledByDefault),
+-      Effect.provideService(
+-        ConfigProvider.ConfigProvider,
+-        ConfigProvider.fromEnv({
+-          env: preference === undefined ? {} : { T3CODE_TELEMETRY_ENABLED: preference },
+-        }),
+-      ),
+-      Effect.orElseSucceed(() => false),
+-    );
+-  });
+-  const httpClient = yield* HttpClient.HttpClient;
+-  const serverConfig = yield* ServerConfig.ServerConfig;
+-  const { distinctId, installId } = yield* getTelemetryIdentity;
+-  const crypto = yield* SecureRandom.SecureRandom;
+-  const bufferRef = yield* Ref.make<ReadonlyArray<BufferedAnalyticsEvent>>([]);
+-  const deliveryRef = yield* Ref.make<DeliveryState>({
+-    failedBatch: [],
+-    batchAttempts: 0,
+-    firstFailedAt: 0,
+-    failures: 0,
+-    retryAt: 0,
+-  });
+-  const recordedOwnersRef = yield* Ref.make<
+-    Readonly<Record<"server" | "client", ReadonlySet<string>>>
+-  >({ server: new Set(), client: new Set() });
+-  // The background flush and the shutdown flush must not send the same batch at once.
+-  const flushLock = yield* Semaphore.make(1);
+-  const clientType = serverConfig.mode === "desktop" ? "desktop-app" : "cli-web-client";
+-  const hostPlatform = yield* HostProcess.Platform;
+-  const hostArchitecture = yield* HostProcess.Architecture;
+-
+-  const enqueueBufferedEvent = (
+-    uuid: string,
+-    event: string,
+-    properties: Readonly<Record<string, unknown>> | undefined,
+-    anonymous: boolean,
+-  ) =>
+-    Effect.flatMap(DateTime.now, (now) =>
+-      Ref.modify(bufferRef, (current) => {
+-        const appended = [
+-          ...current,
+-          {
+-            uuid,
+-            event,
+-            ...(properties ? { properties } : {}),
+-            capturedAt: DateTime.formatIso(now),
+-            ...(anonymous ? { anonymous: true as const } : {}),
+-          } satisfies BufferedAnalyticsEvent,
+-        ];
+-
+-        const next =
+-          appended.length > telemetryConfig.maxBufferedEvents
+-            ? appended.slice(appended.length - telemetryConfig.maxBufferedEvents)
+-            : appended;
+-
+-        return [
+-          {
+-            size: next.length,
+-            dropped: next.length !== appended.length,
+-          } as const,
+-          next,
+-        ] as const;
+-      }),
+-    );
+-
+-  const sendBatch = Effect.fn("AnalyticsService.sendBatch")(function* (
+-    events: ReadonlyArray<BufferedAnalyticsEvent>,
+-  ) {
+-    if (!(yield* telemetryEnabled) || !distinctId) return;
+-
+-    const payload = {
+-      api_key: telemetryConfig.posthogKey,
+-      batch: events.map((event) => ({
+-        uuid: event.uuid,
+-        event: event.event,
+-        distinct_id: event.anonymous ? event.uuid : distinctId,
+-        properties: event.anonymous
+-          ? {
+-              ...event.properties,
+-              $process_person_profile: false,
+-              t3CodeVersion: packageJson.version,
+-              telemetryChannel: ServerConfig.telemetryChannel,
+-            }
+-          : {
+-              ...event.properties,
+-              ...(installId === null ? {} : { installId }),
+-              $process_person_profile: false,
+-              platform: hostPlatform,
+-              wsl: Option.getOrUndefined(telemetryConfig.wslDistroName),
+-              arch: hostArchitecture,
+-              t3CodeVersion: packageJson.version,
+-              telemetryChannel: ServerConfig.telemetryChannel,
+-              clientType,
+-              serverOs: serverOsFromNodePlatform(hostPlatform),
+-              serverArch: hostArchitecture,
+-              serverWslDistro: Option.getOrUndefined(telemetryConfig.wslDistroName),
+-              serverAppVersion: packageJson.version,
+-              serverMode: serverConfig.mode,
+-            },
+-        timestamp: event.capturedAt,
+-      })),
+-    };
+-
+-    yield* HttpClientRequest.post(`${telemetryConfig.posthogHost}/batch/`).pipe(
+-      HttpClientRequest.bodyJson(payload),
+-      Effect.flatMap(httpClient.execute),
+-      Effect.flatMap(HttpClientResponse.filterStatusOk),
+-      Effect.timeout(SEND_TIMEOUT),
+-    );
+-  });
+-
+-  // An anonymous event goes out alone, or the ingest could link it to the other events by request.
+-  const takeBatch = Ref.modify(bufferRef, (current) => {
+-    const next = current.findIndex((event) => event.anonymous);
+-    if (next === 0) return [current.slice(0, 1), current.slice(1)] as const;
+-    const linked = current.slice(0, next === -1 ? current.length : next);
+-    const batch = linked.slice(0, telemetryConfig.flushBatchSize);
+-    return [batch, current.slice(batch.length)] as const;
+-  });
+-
+-  // Back off even after dropping rejected batches so bad API keys cannot drain the queue in a tight loop.
+-  const flush: AnalyticsService["Service"]["flush"] = Effect.gen(function* () {
+-    while (true) {
+-      const delivery = yield* Ref.get(deliveryRef);
+-      const batch = delivery.failedBatch.length > 0 ? delivery.failedBatch : yield* takeBatch;
+-      if (batch.length === 0) {
+-        return;
+-      }
+-
+-      const sent = yield* Effect.result(sendBatch(batch));
+-      if (Result.isSuccess(sent)) {
+-        yield* Ref.set(deliveryRef, {
+-          failedBatch: [],
+-          batchAttempts: 0,
+-          firstFailedAt: 0,
+-          failures: 0,
+-          retryAt: 0,
+-        });
+-        continue;
+-      }
+-
+-      const now = yield* Clock.currentTimeMillis;
+-      const failures = delivery.failures + 1;
+-      const batchAttempts = delivery.batchAttempts + 1;
+-      const firstFailedAt = delivery.batchAttempts === 0 ? now : delivery.firstFailedAt;
+-      const retryAt = now + retryDelayMs(failures, yield* Random.next);
+-      const error = sent.failure;
+-      const rejected =
+-        error._tag === "HttpClientError" &&
+-        error.reason._tag === "StatusCodeError" &&
+-        REJECTED_BATCH_STATUSES.has(error.reason.response.status);
+-      if (!rejected && now - firstFailedAt < MAX_BATCH_RETRY_MS) {
+-        yield* Ref.set(deliveryRef, {
+-          failedBatch: batch,
+-          batchAttempts,
+-          firstFailedAt,
+-          failures,
+-          retryAt,
+-        });
+-        yield* Effect.logDebug("Failed to send telemetry batch; will retry", {
+-          attempt: batchAttempts,
+-          cause: error,
+-        });
+-        return;
+-      }
+-      yield* Ref.set(deliveryRef, {
+-        failedBatch: [],
+-        batchAttempts: 0,
+-        firstFailedAt: 0,
+-        failures,
+-        retryAt,
+-      });
+-      yield* Effect.logWarning(
+-        rejected
+-          ? "Dropped telemetry batch the endpoint rejected"
+-          : "Dropped telemetry batch after repeated send failures",
+-        { events: batch.length, attempts: batchAttempts, cause: error },
+-      );
+-      return;
+-    }
+-  }).pipe(flushLock.withPermit);
+-
+-  const flushWhenDue = Effect.gen(function* () {
+-    const { retryAt } = yield* Ref.get(deliveryRef);
+-    if ((yield* Clock.currentTimeMillis) >= retryAt) {
+-      yield* flush;
+-    }
+-  });
+-
+-  const record: AnalyticsService["Service"]["record"] = Effect.fn("AnalyticsService.record")(
+-    function* (event, properties, options) {
+-      if (!(yield* telemetryEnabled) || !distinctId) return false;
+-
+-      // Catch Node UUID defects too; best-effort telemetry drops events without UUIDs.
+-      const uuid = yield* Effect.exit(crypto.uuidV7());
+-      if (Exit.isFailure(uuid)) return false;
+-
+-      const enqueueResult = yield* enqueueBufferedEvent(
+-        uuid.value,
+-        event,
+-        properties,
+-        options?.anonymous === true,
+-      );
+-      if (enqueueResult.dropped) {
+-        yield* Effect.logDebug("analytics buffer full; dropping oldest event", {
+-          size: enqueueResult.size,
+-          event,
+-        });
+-      }
+-      return true;
+-    },
+-  );
+-
+-  const recordOwners: AnalyticsService["Service"]["recordOwners"] = Effect.fn(
+-    "AnalyticsService.recordOwners",
+-  )((owners, observedBy) =>
+-    Effect.forEach(
+-      owners,
+-      ({ source, ownerId }) =>
+-        Ref.modify(recordedOwnersRef, (recorded) => {
+-          const key = `${source}:${ownerId}`;
+-          const seen = recorded[observedBy];
+-          return seen.has(key) || seen.size >= MAX_RECORDED_OWNERS
+-            ? [false, recorded]
+-            : [true, { ...recorded, [observedBy]: new Set(seen).add(key) }];
+-        }).pipe(
+-          Effect.flatMap((isNew) =>
+-            isNew
+-              ? record("install.owner_observed", { ownerSource: source, ownerId, observedBy })
+-              : Effect.void,
+-          ),
+-        ),
+-      { discard: true },
+-    ),
+-  );
+-
+-  yield* Effect.forever(Effect.sleep(FLUSH_INTERVAL_MS).pipe(Effect.andThen(flushWhenDue)), {
+-    disableYield: true,
+-  }).pipe(Effect.forkScoped);
+-
+-  yield* Effect.addFinalizer(() =>
+-    flush.pipe(Effect.timeout(SHUTDOWN_FLUSH_TIMEOUT), Effect.ignore),
+-  );
+-
+-  return AnalyticsService.of({ record, flush, recordOwners });
+-});
++// This fork has no event queue, install identity, HTTP client or shutdown exporter.
++export const make = Effect.succeed(
++  AnalyticsService.of({
++    record: Effect.fn("AnalyticsService.record")(() => Effect.succeed(false)),
++    flush: Effect.void,
++    recordOwners: Effect.fn("AnalyticsService.recordOwners")(() => Effect.void),
++  }),
++);
+ 
+ export const layer = Layer.effect(AnalyticsService, make);
+diff --git a/apps/web/src/components/clerk/BrowserManagedAuthShell.tsx b/apps/web/src/components/clerk/BrowserManagedAuthShell.tsx
+index 8433294218..69860126e3 100644
+--- a/apps/web/src/components/clerk/BrowserManagedAuthShell.tsx
++++ b/apps/web/src/components/clerk/BrowserManagedAuthShell.tsx
+@@ -13,7 +13,7 @@ export default function BrowserManagedAuthShell({
+   readonly children: ReactNode;
+ }) {
+   return (
+-    <ClerkProvider appearance={clerkAppearance} publishableKey={publishableKey}>
++    <ClerkProvider telemetry={false} appearance={clerkAppearance} publishableKey={publishableKey}>
+       <ManagedRelayAuthProvider>{children}</ManagedRelayAuthProvider>
+     </ClerkProvider>
+   );
+diff --git a/apps/web/src/components/clerk/ElectronManagedAuthShell.tsx b/apps/web/src/components/clerk/ElectronManagedAuthShell.tsx
+index 8ed4de1ffb..cf50f36c62 100644
+--- a/apps/web/src/components/clerk/ElectronManagedAuthShell.tsx
++++ b/apps/web/src/components/clerk/ElectronManagedAuthShell.tsx
+@@ -15,7 +15,12 @@ export default function ElectronManagedAuthShell({
+   readonly children: ReactNode;
+ }) {
+   return (
+-    <ClerkProvider appearance={clerkAppearance} publishableKey={publishableKey} passkeys={passkeys}>
++    <ClerkProvider
++      telemetry={false}
++      appearance={clerkAppearance}
++      publishableKey={publishableKey}
++      passkeys={passkeys}
++    >
+       <ManagedRelayAuthProvider>{children}</ManagedRelayAuthProvider>
+     </ClerkProvider>
+   );
+diff --git a/apps/web/src/observability/clientTracing.ts b/apps/web/src/observability/clientTracing.ts
+index 82b5927087..d14b546004 100644
+--- a/apps/web/src/observability/clientTracing.ts
++++ b/apps/web/src/observability/clientTracing.ts
+@@ -1,3 +1,4 @@
++import { telemetryDisabled } from "@t3tools/shared/otelEnvironment";
+ import * as Exit from "effect/Exit";
+ import * as Layer from "effect/Layer";
+ import * as ManagedRuntime from "effect/ManagedRuntime";
+@@ -74,7 +75,7 @@ let activeConfigKey: string | null = null;
+ let pendingConfiguration = Promise.resolve();
+ 
+ export function configureClientTracing(): Promise<void> {
+-  if (activeConfigKey !== null) {
++  if (telemetryDisabled() || activeConfigKey !== null) {
+     return pendingConfiguration;
+   }
+   pendingConfiguration = pendingConfiguration.finally(() => applyClientTracingConfig());
+diff --git a/docs/user/telemetry.md b/docs/user/telemetry.md
+index 05ae99e2d1..4a32c3380a 100644
+--- a/docs/user/telemetry.md
++++ b/docs/user/telemetry.md
+@@ -1,137 +1,26 @@
+-# Product usage data
+-
+-The T3 Code server sends product usage events to T3 Code's own endpoint at `ingest.t3.codes`,
+-associated with a hashed random identifier for the installation. To count how many installations one person
+-uses, the server also sends a hashed identifier for your T3 Connect account when you are signed in
+-to one, and a random identifier for each device that connects. The endpoint keeps a copy of each
+-event and forwards events to PostHog. Events include the provider, model, reasoning effort,
+-permission mode, turn and request results, duration, release channel, and token counts when
+-available. Child-agent token counts are reported separately from the main agent's. Models from a
+-provider's catalog are reported by name, even when a custom endpoint serves them. Any other
+-model, such as a local or fine-tuned one, is reported only as a custom model of that provider.
+-
+-Product events do not include prompts, responses, file contents, authentication tokens, conversation IDs,
+-raw provider events, child-agent output, or identifiers from your provider accounts. The one exception is [agent feedback](#agent-feedback),
+-which is off unless you turn it on.
+-
+-## Agent feedback
+-
+-Agent feedback lets agents tell the T3 team about T3 Code: a T3 tool or `t3` command that did not
+-do what they expected, a confusing instruction, or a missing capability. Choose a mode in
+-**Agent feedback** in **Settings > Labs**:
+-
+-- **Off**, the default: agents do not see the feedback tools, and `t3 feedback` stops with a
+-  message pointing to Labs.
+-- **When I ask**: agents send a report only when you ask them to, about anything in T3 Code.
+-- **Automatic**: agents also report T3 Code problems they hit on their own, such as a T3 tool that
+-  failed and made them find another way. These go out without asking you, so they carry only the
+-  kind of problem and the tool or command it concerns, with no agent-written text, outline, or
+-  conversation. `t3 feedback --kind bug --subject "t3 thread send" --expected "…" --actual "…"`
+-  sends one the same way, so it works only in this mode.
+-
+-When you ask your agent for a report, in either mode, T3 Code shows it in the thread as a card
+-with exactly what would leave your machine, and sends it only if you press **Send**. The agent
+-carries on without waiting and never learns your answer. The card stays open until you answer it,
+-even after the turn ends or the server restarts; **Don't send** sends nothing, and the agent is
+-told not to send it another way. Only someone who can run agents on that machine can answer the
+-card; people on a guest link cannot.
+-
+-Each report has the kind of problem, the T3 tool or command it concerns (or `general`), and, when
+-you send it from a card, up to 300 characters each of expected behavior, actual behavior, and
+-workaround, written by the agent, which is told not to quote your messages or code. The agent also says how many recent turns the
+-problem spans. A report you approved carries an outline of those turns, and of at least the last 5,
+-from when the agent asked: who spoke, how long each message was, and which tools ran, whether they
+-worked, and how long they took. The outline has no text. Tools from your other MCP servers appear
+-only as `mcp`. Turn on **Include the conversation** in the card to attach the text of your
+-messages and the agent's replies in the turns the problem spans, up to 1,000 characters per
+-message and 16 KB in all, oldest text dropped first; the card shows that text before you send it.
+-To change a report, such as the turns it covers, ask the agent in the chat: it shows a new card,
+-and you can decline the old one. Tool inputs and outputs, files, and attachments are never sent. An agent can
+-show you at most 3 report cards and send 3 reports on its own per turn, and `t3 feedback` can
+-send at most 10 an hour.
+-
+-Before anything is saved, T3 Code removes file paths (when text mentions one, the rest of that line
+-goes with it), your user name, machine name, project title, branch, and git remote, and anything
+-that looks like a key, token, email address, or URL with a password. It cannot recognise your code
+-or a name written in a sentence, so only include the conversation when it holds nothing you would
+-not send. Reports from agents also name the provider and the model. No thread IDs or project IDs
+-are sent, and each report goes out under its own random ID, so reports cannot be tied to your
+-installation or to each other.
+-
+-Reports are saved on your machine first, and a declined one is not saved at all; its card keeps
+-only what you would have sent without the conversation. When product usage
+-data is turned off, saved reports stay there and are not sent. `t3 feedback list` shows recent
+-reports, the thread each came from, and a line for each outline; `t3 feedback list --json` shows
+-exactly what each one holds.
+-
+-## Relay connection diagnostics
+-
+-T3 Code sends relay connection traces to Axiom to diagnose T3 Connect connectivity. These are
+-separate from product events. Traces carry connection timings, request paths, environment and
+-thread identifiers, and error types. They omit machine addresses, query strings, log lines,
+-error messages, and stack frames.
+-
+-To disable product events and relay tracing from the server, set
+-`T3CODE_TELEMETRY_ENABLED=false` or `DO_NOT_TRACK=1` in its environment before starting it.
+-`DO_NOT_TRACK=1` wins over `T3CODE_TELEMETRY_ENABLED=true`. Relay tracing also stops
+-when `T3CODE_OTEL_SDK_DISABLED` or `OTEL_SDK_DISABLED` turns OpenTelemetry export off.
+-
+-On a CI runner, the server sends no product events or relay traces by default. It treats a run as
+-CI when a common CI variable is set, such as `CI`, `GITHUB_ACTIONS`, `GITLAB_CI`, or `JENKINS_URL`.
+-`CI=false` and `CI=0` do not count. To send them from CI anyway, set
+-`T3CODE_TELEMETRY_ENABLED=true`.
+-
+-An administrator can turn product events and relay tracing off in the server and desktop app with
+-a [managed policy](./managed-policy.md#other-capabilities). This does not control traces sent by
+-the hosted web app or mobile clients.
+-
+-The desktop app reads `T3CODE_TELEMETRY_ENABLED` and `DO_NOT_TRACK` from your shell profile (for example `~/.zshrc`) on macOS and
+-Linux, so export them there and restart the app. On Windows, set them as user environment variables.
+-
+-A browser opened from a T3 Code server sends relay traces only while connected and allowed by that
+-server's policy. The hosted web app sends relay traces when configured and has no tracing toggle.
+-
+-## Mobile app diagnostics
+-
+-When the iOS or Android app crashes or hits an error, it sends a report to T3 Code: the error
+-message, the stack trace, the app version, and the device model and OS version. Each launch also
+-sends startup timings, and every report carries a random ID for the install. Reports go through
+-the T3 Connect relay to Axiom. They do not include your threads, prompts, or connection details,
+-but an error message can quote a value the app was handling.
+-
+-To stop sending them, turn off **Send crash reports** in **Settings > About T3 Code > Diagnostics**.
+-
+-The mobile app also sends relay connection traces when its build has tracing configured. These
+-carry an identifier for the current app session. To stop them, turn off **Send connection traces**
+-in **Settings > About T3 Code > Diagnostics**, or on the T3 Connect setup sheet shown after you
+-sign in. This is separate from crash reports. Server environment variables and managed policy do
+-not disable mobile tracing.
+-
+-## Agent activity for mobile notifications
+-
+-When **Publish agent activity** is enabled on a host, it sends project and thread titles, model
+-names, activity status, and environment and thread identifiers to the T3 Connect relay for
+-[mobile notifications and live activities](./mobile-notifications.md). This is separate from
+-product events and relay diagnostics. The telemetry opt-out does not disable it.
+-
+-To stop publishing, turn off **Publish agent activity** under **Settings > Sharing & access** on
+-the host. Turning off notifications on a phone controls that phone's alerts, not the host's
+-publishing setting.
+-
+-## Export diagnostics to your own receiver
+-
+-To send traces, metrics, or logs to an OpenTelemetry receiver, open
+-**Settings > Maintenance > Diagnostics**, select an environment, and enter each signal's OTLP HTTP
+-endpoint under **OpenTelemetry export** (for example `http://localhost:4318/v1/traces`). Save, then
+-restart that environment's server. The receiver must be reachable from the server's machine.
+-**Test** sends an empty export from the server to check an endpoint before or after you save it;
+-saved endpoints are checked when the section opens. Checks send authentication headers only to
+-the signal's currently running endpoint and do not follow redirects. To check a new endpoint
+-that requires authentication, save it and restart the server first.
+-
+-`T3CODE_OTLP_*_URL` and standard `OTEL_EXPORTER_OTLP_*` environment variables override the saved
+-settings. An overridden signal shows **Set by environment** and names the variable that set it, and its
+-**Test** checks the running endpoint instead of the field. For endpoints saved here or set with `T3CODE_OTLP_*_URL`, set `T3CODE_OTLP_HEADERS` for
+-receivers that need authentication and `T3CODE_OTLP_PROTOCOL=http/protobuf` for receivers that do
+-not accept JSON. An endpoint set with `OTEL_EXPORTER_OTLP_*` takes its headers and protocol from
+-`OTEL_EXPORTER_OTLP_HEADERS` and `OTEL_EXPORTER_OTLP_PROTOCOL` instead.
++# Privacy fork: telemetry disabled
++
++This fork disables product analytics, install/owner analytics delivery, anonymous agent feedback delivery,
++relay tracing, OTLP trace/metric/log export (including endpoint probes), and mobile crash/startup
++reporting at source level. Environment variables, saved settings, managed policies and the diagnostics
++switches cannot re-enable these exporters. The build-task collector and old-queue flusher are also
++inert. Clerk telemetry is disabled independently of normal sign-in.
++
++Local logs, local trace files, CPU/memory resource diagnostics and normal provider usage accounting
++remain available. Model requests, authentication, update checks, source control, remote sessions and
++explicitly enabled mobile notifications remain functional network features, not telemetry opt-outs.
++In particular, **Publish agent activity** still sends activity details to the relay for notifications.
++Disable that feature separately if you do not want this functional data transfer.
++
++Provider processes receive common telemetry opt-out variables after user-configured environment
++values. These are defense in depth, not control over arbitrary external binaries: provider CLIs,
++extensions, MCP servers and remote services may have their own reporting and retention policies.
++A self-built client cannot disable logs collected by the official hosted relay or model APIs.
++
++Use builds from the patched source. Installing an official release (including through the normal
++updater) replaces this privacy policy with upstream behavior. Existing files and queues from older
++versions are not deleted; this fork does not transmit them. Explicit feedback reports can still be
++saved locally, but the disabled analytics service never queues or delivers them. Mobile native builds must be regenerated
++and rebuilt so expo-observe is absent from autolinking; an over-the-air JS update alone is insufficient.
++
++This is a source-level privacy policy, not a claim that the application makes zero network requests.
+diff --git a/infra/relay/src/http/Api.ts b/infra/relay/src/http/Api.ts
+index 259d62a6b8..661b36e15c 100644
+--- a/infra/relay/src/http/Api.ts
++++ b/infra/relay/src/http/Api.ts
+@@ -1716,6 +1716,7 @@ function verifyClerkOAuthBearerToken(
+   return Effect.tryPromise({
+     try: async () => {
+       const client = createClerkClient({
++        telemetry: { disabled: true },
+         secretKey: Redacted.value(config.clerkSecretKey),
+         publishableKey: config.clerkPublishableKey,
+       });
+diff --git a/infra/relay/src/mobileTelemetry/MobileTelemetry.test.ts b/infra/relay/src/mobileTelemetry/MobileTelemetry.test.ts
+index 1adea38b2a..6a18086852 100644
+--- a/infra/relay/src/mobileTelemetry/MobileTelemetry.test.ts
++++ b/infra/relay/src/mobileTelemetry/MobileTelemetry.test.ts
+@@ -1,13 +1,11 @@
+ import * as NodeHttpPlatform from "@effect/platform-node/NodeHttpPlatform";
+ import * as NodeServices from "@effect/platform-node/NodeServices";
+-import { describe, expect, it } from "@effect/vitest";
++import { expect, it } from "@effect/vitest";
+ import { RelayApi } from "@t3tools/contracts/relay";
+ import * as Deferred from "effect/Deferred";
+ import * as Effect from "effect/Effect";
+-import * as Fiber from "effect/Fiber";
+ import * as Layer from "effect/Layer";
+ import * as Redacted from "effect/Redacted";
+-import * as Schema from "effect/Schema";
+ import * as Etag from "effect/http/Etag";
+ import * as HttpClient from "effect/http/HttpClient";
+ import type * as HttpClientError from "effect/http/HttpClientError";
+@@ -25,21 +23,12 @@ import * as RelayHttpApi from "../http/Api.ts";
+ import * as MobileTelemetry from "./MobileTelemetry.ts";
+ 
+ const PROJECT_ID = "d763fcb8-d37c-41ea-a773-b54a0ab4a454";
+-const UPDATE_ID = "0198e8a4-1111-7000-8000-000000000001";
+-const BUILD_ID = "0198e8a4-2222-7000-8000-000000000002";
+-const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+-const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+-
+ const destinations = {
+   traces: { url: "https://axiom.test/v1/traces", dataset: "mobile-traces" },
+   logs: { url: "https://axiom.test/v1/logs", dataset: "mobile-logs" },
+   metrics: { url: "https://axiom.test/v1/metrics", dataset: "mobile-metrics" },
+ } as const;
+ 
+-/** Maps generated column 12 of the one-line bundle to `src/App.tsx` 1:2. */
+-const SOURCE_MAP = encodeJson({ version: 3, sources: ["src/App.tsx"], mappings: "AAAA,UAAE" });
+-const STACK = "Error: x\n    at render (address at index.android.bundle:1:12)";
+-
+ interface Harness {
+   readonly execute?: (
+     request: HttpClientRequest.HttpClientRequest,
+@@ -125,258 +114,13 @@ const ingest = (signal: string, body: string) =>
+     body,
+   });
+ 
+-const sentText = (request: HttpClientRequest.HttpClientRequest) =>
+-  request.body._tag === "Uint8Array" ? new TextDecoder().decode(request.body.body) : "";
+-
+-const str = (key: string, value: string) => ({ key, value: { stringValue: value } });
+-
+-/** One resource's JS exception, as Observe reports it from the app's bundle. */
+-const exceptionResource = (resource: ReadonlyArray<ReturnType<typeof str>>) => ({
+-  resource: { attributes: resource },
+-  scopeLogs: [
+-    {
+-      logRecords: [
+-        {
+-          attributes: [str("expo.error.source", "global"), str("exception.stacktrace", STACK)],
+-        },
+-      ],
+-    },
+-  ],
+-});
+-
+-/** Each forwarded exception record's string attributes. */
+-const forwardedExceptions = (request: HttpClientRequest.HttpClientRequest) => {
+-  const payload = decodeJson(sentText(request)) as {
+-    resourceLogs: Array<{
+-      scopeLogs: Array<{
+-        logRecords: Array<{ attributes: Array<{ key: string; value: { stringValue: string } }> }>;
+-      }>;
+-    }>;
+-  };
+-  return payload.resourceLogs.map((resourceLogs) =>
+-    Object.fromEntries(
+-      resourceLogs.scopeLogs[0]!.logRecords[0]!.attributes.map(({ key, value }) => [
+-        key,
+-        value.stringValue,
+-      ]),
+-    ),
+-  );
+-};
+-
+-describe("MobileTelemetry", () => {
+-  it.effect("forwards each signal to its Axiom dataset with the relay's token", () =>
+-    Effect.gen(function* () {
+-      const harness = makeHarness();
+-      const body = encodeJson({ resourceMetrics: [] });
+-      for (const signal of ["metrics", "traces", "logs"] as const) {
+-        const response = yield* harness.send(ingest(signal, body));
+-        expect(response.status).toBe(200);
+-      }
+-      expect(
+-        harness.sent.map((request) => ({
+-          url: request.url,
+-          authorization: request.headers.authorization,
+-          dataset: request.headers["x-axiom-dataset"],
+-          body: sentText(request),
+-        })),
+-      ).toEqual(
+-        (["metrics", "traces", "logs"] as const).map((signal) => ({
+-          url: destinations[signal].url,
+-          authorization: "Bearer axiom-ingest-token",
+-          dataset: destinations[signal].dataset,
+-          body,
+-        })),
+-      );
+-    }),
+-  );
+-
+-  it.effect("passes Axiom's status and Retry-After back for Observe's retries", () =>
+-    Effect.gen(function* () {
+-      const harness = makeHarness({
+-        execute: (request) =>
+-          Effect.succeed(
+-            HttpClientResponse.fromWeb(
+-              request,
+-              new Response('{"message":"slow down"}', {
+-                status: 429,
+-                headers: { "content-type": "application/json", "retry-after": "30" },
+-              }),
+-            ),
+-          ),
+-      });
+-      const response = yield* harness.send(ingest("metrics", "{}"));
+-      expect(response.status).toBe(429);
+-      expect(response.headers["retry-after"]).toBe("30");
+-    }),
+-  );
+-
+-  it.effect("symbolicates JS exceptions with the OTA update's map, else the build's", () =>
+-    Effect.gen(function* () {
+-      const harness = makeHarness({
+-        objects: {
+-          [`android/ota/${UPDATE_ID}.map`]: SOURCE_MAP,
+-          [`ios/build/${BUILD_ID}.map`]: SOURCE_MAP,
+-        },
+-      });
+-      const body = encodeJson({
+-        resourceLogs: [
+-          exceptionResource([
+-            str("os.type", "linux"),
+-            str("expo.app.update_id", UPDATE_ID),
+-            str("expo.eas_build.id", BUILD_ID),
+-          ]),
+-          exceptionResource([str("os.type", "darwin"), str("expo.eas_build.id", BUILD_ID)]),
+-        ],
+-      });
+-      expect((yield* harness.send(ingest("logs", body))).status).toBe(200);
+-      const symbolicated = (key: string) => ({
+-        "expo.error.source": "global",
+-        "exception.stacktrace": "Error: x\n    at render (src/App.tsx:1:3)",
+-        "relay.symbolication.source_map": key,
+-        "relay.symbolication.status": "symbolicated",
+-        "relay.symbolication.raw_stacktrace": STACK,
+-      });
+-      expect(forwardedExceptions(harness.sent[0]!)).toEqual([
+-        symbolicated(`android/ota/${UPDATE_ID}.map`),
+-        symbolicated(`ios/build/${BUILD_ID}.map`),
+-      ]);
+-    }),
+-  );
+-
+-  it.effect("forwards the stack untouched when the OTA update's map is missing", () =>
+-    Effect.gen(function* () {
+-      // The build's map describes the embedded bundle, not the update that threw.
+-      const harness = makeHarness({
+-        objects: { [`android/build/${BUILD_ID}.map`]: SOURCE_MAP },
+-      });
+-      const body = encodeJson({
+-        resourceLogs: [
+-          exceptionResource([
+-            str("os.type", "linux"),
+-            str("expo.app.update_id", UPDATE_ID),
+-            str("expo.eas_build.id", BUILD_ID),
+-          ]),
+-        ],
+-      });
+-      expect((yield* harness.send(ingest("logs", body))).status).toBe(200);
+-      expect(forwardedExceptions(harness.sent[0]!)).toEqual([
+-        {
+-          "expo.error.source": "global",
+-          "exception.stacktrace": STACK,
+-          "relay.symbolication.status": "source_map_missing",
+-        },
+-      ]);
+-    }),
+-  );
+-
+-  it.effect("says why a stack stayed minified, without the iOS install path", () =>
+-    Effect.gen(function* () {
+-      const harness = makeHarness({ objects: { [`ios/build/${BUILD_ID}.map`]: "{}" } });
+-      const iosStack =
+-        "Error: x\n    at render (address at /private/var/containers/Bundle/Application/" +
+-        "0C1D/T3Code.app/main.jsbundle:1:12)";
+-      const record = (stack: string) => ({
+-        scopeLogs: [{ logRecords: [{ attributes: [str("exception.stacktrace", stack)] }] }],
+-      });
+-      const body = encodeJson({
+-        resourceLogs: [
+-          { resource: { attributes: [str("os.type", "linux")] }, ...record(STACK) },
+-          {
+-            resource: {
+-              attributes: [str("os.type", "darwin"), str("expo.eas_build.id", BUILD_ID)],
+-            },
+-            ...record(iosStack),
+-          },
+-        ],
+-      });
+-      expect((yield* harness.send(ingest("logs", body))).status).toBe(200);
+-      expect(forwardedExceptions(harness.sent[0]!)).toEqual([
+-        { "exception.stacktrace": STACK, "relay.symbolication.status": "no_bundle_id" },
+-        {
+-          "exception.stacktrace": "Error: x\n    at render (address at main.jsbundle:1:12)",
+-          "relay.symbolication.status": "source_map_invalid",
+-        },
+-      ]);
+-    }),
+-  );
+-
+-  it.effect("marks the native abort that follows a fatal JS error in the same session", () =>
+-    Effect.gen(function* () {
+-      const harness = makeHarness();
+-      const fatal = { key: "expo.error.is_fatal", value: { boolValue: true } };
+-      const crash = (session: string, source: string) => ({
+-        attributes: [str("expo.error.source", source), str("session.id", session), fatal],
+-      });
+-      const body = encodeJson({
+-        resourceLogs: [
+-          {
+-            resource: { attributes: [str("os.type", "darwin")] },
+-            scopeLogs: [
+-              {
+-                logRecords: [
+-                  crash("a", "global"),
+-                  crash("a", "nativeCrash"),
+-                  crash("b", "nativeCrash"),
+-                ],
+-              },
+-            ],
+-          },
+-        ],
+-      });
+-      expect((yield* harness.send(ingest("logs", body))).status).toBe(200);
+-      const records = (
+-        decodeJson(sentText(harness.sent[0]!)) as {
+-          resourceLogs: Array<{
+-            scopeLogs: Array<{ logRecords: Array<{ attributes: Array<{ key: string }> }> }>;
+-          }>;
+-        }
+-      ).resourceLogs[0]!.scopeLogs[0]!.logRecords;
+-      expect(
+-        records.map((record) =>
+-          record.attributes.some((attribute) => attribute.key === "relay.crash.js_fatal"),
+-        ),
+-      ).toEqual([false, true, false]);
+-    }),
+-  );
+-
+-  it.effect("answers 413 for a body over the cap without forwarding it", () =>
+-    Effect.gen(function* () {
+-      const harness = makeHarness();
+-      const tooLarge = "x".repeat(MobileTelemetry.MOBILE_TELEMETRY_MAX_BODY_BYTES + 1);
+-      expect((yield* harness.send(ingest("logs", tooLarge))).status).toBe(413);
+-      expect(harness.sent).toEqual([]);
+-    }),
+-  );
+-
+-  it.effect("decodes one source map at a time", () =>
+-    Effect.gen(function* () {
+-      const releaseFirst = yield* Deferred.make<void>();
+-      const firstStarted = yield* Deferred.make<void>();
+-      let firstDone = false;
+-      let secondSawFirstDone: boolean | undefined;
+-      const sourceMaps = yield* MobileTelemetry.SourceMaps.pipe(
+-        Effect.provide(MobileTelemetry.layerSourceMaps),
+-        Effect.provideService(MobileTelemetry.SourceMapObjects, {
+-          get: (key) =>
+-            key === "first"
+-              ? Deferred.succeed(firstStarted, undefined).pipe(
+-                  Effect.andThen(Deferred.await(releaseFirst)),
+-                  Effect.as({ size: SOURCE_MAP.length, text: Effect.succeed(SOURCE_MAP) }),
+-                  Effect.ensuring(Effect.sync(() => (firstDone = true))),
+-                )
+-              : Effect.sync(() => {
+-                  secondSawFirstDone = firstDone;
+-                  return { size: SOURCE_MAP.length, text: Effect.succeed(SOURCE_MAP) };
+-                }),
+-        }),
+-      );
+-      const first = yield* Effect.forkChild(sourceMaps.find("first"));
+-      yield* Deferred.await(firstStarted);
+-      const second = yield* Effect.forkChild(sourceMaps.find("second"), { startImmediately: true });
+-      yield* Deferred.succeed(releaseFirst, undefined);
+-      yield* Fiber.join(first);
+-      expect(yield* Fiber.join(second)).toMatchObject({ key: "second" });
+-      expect(secondSawFirstDone).toBe(true);
+-    }),
+-  );
++it.effect("drops crash, startup, trace and metric payloads without forwarding", () => {
++  const { sent, send } = makeHarness();
++  return Effect.gen(function* () {
++    for (const signal of ["logs", "traces", "metrics"]) {
++      const response = yield* send(ingest(signal, '{"private":"must stay local"}'));
++      expect(response.status).toBe(204);
++    }
++    expect(sent).toHaveLength(0);
++  }).pipe(Effect.scoped);
+ });
+diff --git a/infra/relay/src/mobileTelemetry/MobileTelemetry.ts b/infra/relay/src/mobileTelemetry/MobileTelemetry.ts
+index 88a6ba1e4d..337ca9c841 100644
+--- a/infra/relay/src/mobileTelemetry/MobileTelemetry.ts
++++ b/infra/relay/src/mobileTelemetry/MobileTelemetry.ts
+@@ -1,3 +1,4 @@
++import { telemetryDisabled } from "@t3tools/shared/otelEnvironment";
+ import * as Cache from "effect/Cache";
+ import * as Context from "effect/Context";
+ import * as Duration from "effect/Duration";
+@@ -256,6 +257,7 @@ const make = Effect.gen(function* () {
+       signal,
+     }: { readonly projectId: string; readonly signal: RelayMobileTelemetrySignal },
+   ) {
++    if (telemetryDisabled()) return HttpServerResponse.empty({ status: 204 });
+     const outcome = (value: string) =>
+       Effect.annotateCurrentSpan({ "relay.mobile_telemetry.outcome": value });
+     yield* Effect.annotateCurrentSpan({
+diff --git a/infra/relay/src/t3chat/T3ChatAccounts.ts b/infra/relay/src/t3chat/T3ChatAccounts.ts
+index d81bc049fd..0f2d0bd27f 100644
+--- a/infra/relay/src/t3chat/T3ChatAccounts.ts
++++ b/infra/relay/src/t3chat/T3ChatAccounts.ts
+@@ -119,6 +119,7 @@ export const make = Effect.gen(function* () {
+     return yield* Effect.tryPromise({
+       try: async () => {
+         const user = await createClerkClient({
++          telemetry: { disabled: true },
+           secretKey: Redacted.value(config.clerkSecretKey),
+           publishableKey: config.clerkPublishableKey,
+         }).users.getUser(userId);
+diff --git a/infra/relay/src/worker.ts b/infra/relay/src/worker.ts
+index 3c9492a020..2abe006521 100644
+--- a/infra/relay/src/worker.ts
++++ b/infra/relay/src/worker.ts
+@@ -1,5 +1,4 @@
+ import * as Alchemy from "alchemy";
+-import * as Axiom from "@alchemy.run/axiom";
+ import * as Cloudflare from "@alchemy.run/cloudflare";
+ import * as Drizzle from "@alchemy.run/drizzle/Postgres";
+ import * as Config from "effect/Config";
+@@ -595,17 +594,6 @@ export const layer = Api.make(
+         Layer.provideMerge(
+           Alchemy.Telemetry.layer(Layer.succeed(HttpMiddleware.TracerDisabledWhen)(() => true)),
+         ),
+-        Layer.provideMerge(
+-          Layer.unwrap(
+-            Effect.map(RelayObservability, (observability) =>
+-              Axiom.Telemetry({
+-                serviceName: "t3code-relay",
+-                token: observability.workerIngestToken,
+-                traces: observability.traces,
+-              }),
+-            ),
+-          ),
+-        ),
+       ),
+     ),
+   ),
+diff --git a/infra/task-cache/src/Cache.test.ts b/infra/task-cache/src/Cache.test.ts
+index 6836291609..804e32782e 100644
+--- a/infra/task-cache/src/Cache.test.ts
++++ b/infra/task-cache/src/Cache.test.ts
+@@ -225,7 +225,7 @@ it.effect("does not charge authenticated budgets for anonymous or malformed requ
+       ),
+       { waitUntil: () => {} },
+     );
+-    expect(limit.mock.calls).toEqual([[{ key: "t3code:telemetry" }], [{ key: "t3code:blob" }]]);
++    expect(limit.mock.calls).toEqual([[{ key: "t3code:blob" }]]);
+   }).pipe(
+     Effect.provide(
+       Cache.layer.pipe(
+diff --git a/infra/task-cache/src/Cache.ts b/infra/task-cache/src/Cache.ts
+index 6c761ff008..618f8d43a7 100644
+--- a/infra/task-cache/src/Cache.ts
++++ b/infra/task-cache/src/Cache.ts
+@@ -4,14 +4,10 @@ import * as Clock from "effect/Clock";
+ import * as Layer from "effect/Layer";
+ import * as Schema from "effect/Schema";
+ import type * as Cloudflare from "@cloudflare/workers-types";
+-import { Summary, recordSummary } from "./Summary.ts";
+-import * as Savings from "./Savings.ts";
+ import type { ProtocolBindings } from "./protocolTypes.ts";
+ import * as Admission from "./Admission.ts";
+ import { developerIdentity } from "./developerAuth.ts";
+ 
+-const decodeSummary = Schema.decodeEffect(Schema.fromJsonString(Summary));
+-
+ export class CacheError extends Schema.TaggedError<CacheError>()("CacheError", {
+   status: Schema.Number,
+   reason: Schema.String,
+@@ -41,11 +37,9 @@ export class Cache extends Context.Service<
+ const make = Effect.gen(function* () {
+   const bindings = yield* Bindings;
+   const admission = yield* Admission.Admission;
+-  const savings = yield* Savings.Savings;
+   // The source-only protocol dependency is bundled for Workers, never evaluated by Node during deployment.
+   const {
+     authorizeCacheWrite,
+-    authorizeTelemetry,
+     keys,
+     cleanup,
+     getScope,
+@@ -55,7 +49,6 @@ const make = Effect.gen(function* () {
+     fetchMetadata,
+     defaults,
+     store,
+-    readBody,
+     Deadline,
+     Observations,
+   } = yield* Effect.promise(() => import("./protocol.ts"));
+@@ -143,34 +136,6 @@ const make = Effect.gen(function* () {
+               if (!writing && operation !== "telemetry") yield* checkLimit(operation);
+               const scope = yield* protocol(() => getScope(bindings.INDEX, "t3code", stats));
+               if (operation === "telemetry") {
+-                let identity = developer ?? undefined;
+-                if (identity === undefined) {
+-                  identity = yield* protocol(() => authorizeTelemetry(request, scope, keys));
+-                }
+-                yield* checkLimit(operation);
+-                const bytes = yield* protocol(() => readBody(request.body, 256 * 1024, deadline));
+-                const summary = yield* decodeSummary(new TextDecoder().decode(bytes)).pipe(
+-                  Effect.mapError(() => new CacheError({ status: 400, reason: "invalid_summary" })),
+-                );
+-                if (summary.tasks.length === 0) return new Response(null, { status: 204 });
+-                const now = yield* Clock.currentTimeMillis;
+-                if (summary.recordedAt > now + 60_000 || summary.recordedAt < now - 30 * 86400_000)
+-                  return yield* new CacheError({ status: 400, reason: "summary_expired" });
+-                yield* savings
+-                  .record(summary, identity)
+-                  .pipe(
+-                    Effect.mapError(
+-                      () => new CacheError({ status: 503, reason: "telemetry_unavailable" }),
+-                    ),
+-                  );
+-                yield* recordSummary(summary, identity);
+-                yield* savings
+-                  .emitTotals(identity, summary.host)
+-                  .pipe(
+-                    Effect.mapError(
+-                      () => new CacheError({ status: 503, reason: "telemetry_unavailable" }),
+-                    ),
+-                  );
+                 return new Response(null, { status: 204 });
+               }
+               if (writing) {
+diff --git a/infra/task-cache/src/runHook.ts b/infra/task-cache/src/runHook.ts
+index 4f11fbbd4c..e9496a5846 100644
+--- a/infra/task-cache/src/runHook.ts
++++ b/infra/task-cache/src/runHook.ts
+@@ -1,41 +1,8 @@
+-// @effect-diagnostics nodeBuiltinImport:off - runs inside Vite+ before project services start.
+-import * as NodeChildProcess from "node:child_process";
+-import * as NodeURL from "node:url";
+ import { remoteCacheUrl } from "./remoteCache.ts";
+-import { flushTelemetry, observeSummaries } from "./telemetry.ts";
+ 
+ export default function start({ root }: { readonly root: string }) {
+-  const url = remoteCacheUrl(root);
+-  if (!url) return;
+-  const endpoint = new URL(url);
+-  endpoint.username = "";
+-  endpoint.password = "";
+-  const stop =
+-    process.env.T3_TASK_CACHE_TELEMETRY === "off"
+-      ? undefined
+-      : observeSummaries(root, endpoint.href.replace(/\/$/, ""), process.env);
+-  const finish = async () => {
+-    if (!stop) return;
+-    stop();
+-    // GitHub can terminate detached processes as soon as the final step exits.
+-    if (process.env.GITHUB_ACTIONS === "true") {
+-      await flushTelemetry();
+-      return;
+-    }
+-    // A transient flusher drains the durable queue without delaying tasks or Ctrl-C.
+-    const child = NodeChildProcess.spawn(
+-      process.execPath,
+-      [NodeURL.fileURLToPath(new URL("./flush.ts", import.meta.url))],
+-      {
+-        detached: true,
+-        stdio: "ignore",
+-        env: { ...process.env, NODE_OPTIONS: "" },
+-      },
+-    );
+-    child.on("error", () => {});
+-    child.unref();
+-  };
+-  return Object.assign(finish, {
++  if (!remoteCacheUrl(root)) return;
++  return Object.assign(() => {}, {
+     remoteCache: process.env.VP_REMOTE_CACHE || process.env.VP_T3_TASK_CACHE_MODE || "read-write",
+   });
+ }
+diff --git a/infra/task-cache/src/telemetry.test.ts b/infra/task-cache/src/telemetry.test.ts
+index 612b0194b5..9b0bc105ab 100644
+--- a/infra/task-cache/src/telemetry.test.ts
++++ b/infra/task-cache/src/telemetry.test.ts
+@@ -1,13 +1,32 @@
+-// @effect-diagnostics nodeBuiltinImport:off - launcher integration with filesystem and fetch.
++// @effect-diagnostics nodeBuiltinImport:off - bootstrap integration exercises the filesystem and fetch.
+ import * as NodeFS from "node:fs";
+ import * as NodeOS from "node:os";
+ import * as NodePath from "node:path";
+ import { expect, it, vi } from "vite-plus/test";
+ import { flushTelemetry, observeSummaries, summarize } from "./telemetry.ts";
+ 
+-vi.mock("node:fs", async (importOriginal) => {
+-  const fs = await importOriginal<typeof import("node:fs")>();
+-  return { ...fs, rmdirSync: vi.fn(fs.rmdirSync) };
++it("never creates a collector queue or sends an old queued event", async () => {
++  const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-privacy-"));
++  try {
++    const stop = observeSummaries(
++      home,
++      "https://collector.example",
++      { T3_TASK_CACHE_TELEMETRY: "on" },
++      home,
++    );
++    expect(NodeFS.existsSync(NodePath.join(home, ".cache"))).toBe(false);
++    stop();
++    const queue = NodePath.join(home, ".cache/t3-task-cache/telemetry");
++    NodeFS.mkdirSync(queue, { recursive: true });
++    const event = NodePath.join(queue, "pending.json");
++    NodeFS.writeFileSync(event, '{"private":"old event"}');
++    using send = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("must not send"));
++    await flushTelemetry(home, { T3_TASK_CACHE_TELEMETRY: "on" });
++    expect(send).not.toHaveBeenCalled();
++    expect(NodeFS.readFileSync(event, "utf8")).toBe('{"private":"old event"}');
++  } finally {
++    NodeFS.rmSync(home, { recursive: true });
++  }
+ });
+ 
+ const task = (result: unknown) => ({
+@@ -38,167 +57,3 @@ it("counts only confirmed hits, preserves their tier, and never transmits comman
+     { package: "@team/server", task: "typecheck", source: "unspecified", savedMs: 999 },
+   ]);
+ });
+-
+-it("deduplicates shared summaries and retries delivery without credentials in queued records", async () => {
+-  const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "cache-observer-"));
+-  const home = NodePath.join(root, "home");
+-  const endpoint = "https://cache.example/projects/t3code";
+-  try {
+-    const stopA = observeSummaries(root, endpoint, { T3_TASK_CACHE_HOST: "test-host" }, home);
+-    const stopB = observeSummaries(root, endpoint, { T3_TASK_CACHE_HOST: "test-host" }, home);
+-    const version = NodePath.join(root, "node_modules/.vite/task-cache/v18");
+-    NodeFS.mkdirSync(version);
+-    NodeFS.writeFileSync(
+-      NodePath.join(version, "last-summary.json"),
+-      JSON.stringify({
+-        tasks: [task({ CacheHit: { source: "Remote", saved_duration_ms: 1200 } })],
+-      }),
+-    );
+-    stopA();
+-    stopB();
+-    const queue = NodePath.join(home, ".cache/t3-task-cache/telemetry");
+-    const files = NodeFS.readdirSync(queue);
+-    expect(files).toHaveLength(1);
+-    const serialized = NodeFS.readFileSync(NodePath.join(queue, files[0]!), "utf8");
+-    expect(serialized).not.toContain("SECRET");
+-    expect(JSON.parse(serialized).event.host).toBe("test-host");
+-    NodeFS.mkdirSync(NodePath.join(home, ".config/t3-task-cache"), { recursive: true });
+-    NodeFS.writeFileSync(
+-      NodePath.join(home, ".config/t3-task-cache/credentials.json"),
+-      JSON.stringify({ [endpoint]: { name: "alice", token: "secret-token" } }),
+-    );
+-    using request = vi
+-      .spyOn(globalThis, "fetch")
+-      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+-      .mockImplementationOnce(async () => {
+-        const late = JSON.parse(serialized);
+-        late.event.id = "b".repeat(64);
+-        NodeFS.writeFileSync(NodePath.join(queue, "late.json"), JSON.stringify(late));
+-        return new Response(null, { status: 204 });
+-      })
+-      .mockResolvedValue(new Response(null, { status: 204 }));
+-    await flushTelemetry(home, {});
+-    expect(NodeFS.readdirSync(queue)).toEqual(files);
+-    await flushTelemetry(home, {});
+-    expect(NodeFS.readdirSync(queue)).toEqual([]);
+-    expect(request).toHaveBeenCalledTimes(3);
+-    expect(request.mock.calls[0]![0].toString()).toBe(`${endpoint}/telemetry`);
+-  } finally {
+-    NodeFS.rmSync(root, { recursive: true, force: true });
+-  }
+-});
+-
+-it("skips unauthenticated endpoints without consuming the delivery budget", async () => {
+-  const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "cache-queue-"));
+-  const endpoint = "https://cache.example/projects/t3code";
+-  try {
+-    const queue = NodePath.join(home, ".cache/t3-task-cache/telemetry");
+-    NodeFS.mkdirSync(queue, { recursive: true });
+-    const skipped = Array.from({ length: 101 }, (_, i) => `a${i}.json`);
+-    for (const file of skipped)
+-      NodeFS.writeFileSync(
+-        NodePath.join(queue, file),
+-        JSON.stringify({ endpoint: "https://old.example/projects/t3code", event: { id: file } }),
+-      );
+-    NodeFS.writeFileSync(
+-      NodePath.join(queue, "b.json"),
+-      JSON.stringify({ endpoint, event: { id: "current" } }),
+-    );
+-    NodeFS.mkdirSync(NodePath.join(home, ".config/t3-task-cache"), { recursive: true });
+-    NodeFS.writeFileSync(
+-      NodePath.join(home, ".config/t3-task-cache/credentials.json"),
+-      JSON.stringify({ [endpoint]: { name: "alice", token: "secret-token" } }),
+-    );
+-    using request = vi
+-      .spyOn(globalThis, "fetch")
+-      .mockResolvedValue(new Response(null, { status: 204 }));
+-    await flushTelemetry(home, {});
+-    expect(NodeFS.readdirSync(queue).sort()).toEqual(skipped.sort());
+-    expect(request).toHaveBeenCalledOnce();
+-    expect(request.mock.calls[0]![0].toString()).toBe(`${endpoint}/telemetry`);
+-  } finally {
+-    NodeFS.rmSync(home, { recursive: true, force: true });
+-  }
+-});
+-
+-it("excludes tasks that explicitly disable caching from the hit-rate denominator", () => {
+-  expect(
+-    summarize({
+-      tasks: [
+-        task({ Spawned: { cache_status: "Disabled" } }),
+-        task({ Spawned: { cache_status: { Miss: "changed" } } }),
+-      ],
+-    }),
+-  ).toEqual([{ package: "@team/server", task: "typecheck", source: "executed", savedMs: 0 }]);
+-});
+-
+-it("drops revoked credentials and continues delivering other queued endpoints", async () => {
+-  const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "cache-revoked-"));
+-  try {
+-    const queue = NodePath.join(home, ".cache/t3-task-cache/telemetry");
+-    const state = NodePath.join(home, ".config/t3-task-cache");
+-    NodeFS.mkdirSync(queue, { recursive: true });
+-    NodeFS.mkdirSync(state, { recursive: true });
+-    NodeFS.writeFileSync(
+-      NodePath.join(state, "credentials.json"),
+-      JSON.stringify({
+-        "https://revoked.example": { name: "a", token: "old" },
+-        "https://current.example": { name: "a", token: "new" },
+-      }),
+-    );
+-    for (const [file, endpoint] of [
+-      ["a.json", "https://revoked.example"],
+-      ["b.json", "https://current.example"],
+-    ])
+-      NodeFS.writeFileSync(
+-        NodePath.join(queue, file!),
+-        JSON.stringify({ endpoint, event: { id: file } }),
+-      );
+-    using request = vi
+-      .spyOn(globalThis, "fetch")
+-      .mockResolvedValueOnce(new Response(null, { status: 403 }))
+-      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+-    await flushTelemetry(home, {});
+-    expect(request).toHaveBeenCalledTimes(2);
+-    expect(NodeFS.readdirSync(queue)).toEqual([]);
+-  } finally {
+-    NodeFS.rmSync(home, { recursive: true, force: true });
+-  }
+-});
+-
+-it("delivers an event queued while the previous flusher releases its lock", async () => {
+-  const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "cache-handoff-"));
+-  const endpoint = "https://cache.example/projects/t3code";
+-  try {
+-    const queue = NodePath.join(home, ".cache/t3-task-cache/telemetry");
+-    const state = NodePath.join(home, ".config/t3-task-cache");
+-    NodeFS.mkdirSync(queue, { recursive: true });
+-    NodeFS.mkdirSync(state, { recursive: true });
+-    NodeFS.writeFileSync(
+-      NodePath.join(state, "credentials.json"),
+-      JSON.stringify({ [endpoint]: { name: "alice", token: "secret-token" } }),
+-    );
+-    using request = vi
+-      .spyOn(globalThis, "fetch")
+-      .mockImplementation(async () => new Response(null, { status: 204 }));
+-    const rmdirSync = vi.mocked(NodeFS.rmdirSync);
+-    const release = rmdirSync.getMockImplementation()!;
+-    let competing: Promise<void> | undefined;
+-    // The next command queues its event after this flusher's last scan, and its own flusher
+-    // gives up because the lock is still held.
+-    rmdirSync.mockImplementationOnce((path, options) => {
+-      NodeFS.writeFileSync(
+-        NodePath.join(queue, "late.json"),
+-        JSON.stringify({ endpoint, event: { id: "late" } }),
+-      );
+-      competing = flushTelemetry(home, {});
+-      release(path, options);
+-    });
+-    await flushTelemetry(home, {});
+-    await competing;
+-    expect(request).toHaveBeenCalledOnce();
+-    expect(NodeFS.readdirSync(queue)).toEqual([]);
+-  } finally {
+-    NodeFS.rmSync(home, { recursive: true, force: true });
+-  }
+-});
+diff --git a/infra/task-cache/src/telemetry.ts b/infra/task-cache/src/telemetry.ts
+index 0fb8d5914d..d708d70f9d 100644
+--- a/infra/task-cache/src/telemetry.ts
++++ b/infra/task-cache/src/telemetry.ts
+@@ -1,10 +1,6 @@
+-/* oxlint-disable t3code/no-global-process-runtime -- This bootstrap runs before dependencies are installed. */
+ // @effect-diagnostics globalDate:off globalFetch:off - bootstrap has no Effect dependencies.
+ // @effect-diagnostics nodeBuiltinImport:off - standalone collector installed outside the checkout.
+-import * as NodeCrypto from "node:crypto";
+-import * as NodeFS from "node:fs";
+ import * as NodeOS from "node:os";
+-import * as NodePath from "node:path";
+ 
+ export interface SummaryEvent {
+   id: string;
+@@ -77,200 +73,14 @@ export function summarize(value: unknown): SummaryEvent["tasks"] {
+   });
+ }
+ 
++// Keep bootstrap callers compatible, without a watcher, disk queue or network flusher.
+ export function observeSummaries(
+-  root: string,
+-  endpoint: string,
+-  env: NodeJS.ProcessEnv,
+-  home = NodeOS.homedir(),
++  _root: string,
++  _endpoint: string,
++  _env: NodeJS.ProcessEnv,
++  _home = NodeOS.homedir(),
+ ) {
+-  const cache = env.VITE_CACHE_PATH || NodePath.join(root, "node_modules/.vite/task-cache");
+-  const queue = NodePath.join(home, ".cache/t3-task-cache/telemetry");
+-  let host =
+-    env.T3_TASK_CACHE_HOST ||
+-    (env.GITHUB_ACTIONS === "true"
+-      ? `${env.RUNNER_ENVIRONMENT || "github"}/${env.RUNNER_OS || NodeOS.platform()}/${env.RUNNER_ARCH || NodeOS.arch()}`
+-      : NodeOS.hostname());
+-  try {
+-    host =
+-      env.T3_TASK_CACHE_HOST ||
+-      NodeFS.readFileSync(NodePath.join(home, ".agents/MACHINE"), "utf8").trim() ||
+-      host;
+-  } catch {
+-    /* Machine labels are optional outside the fleet. */
+-  }
+-  const seen = new Set<string>();
+-  const snapshot = (file: string, enqueue: boolean) => {
+-    try {
+-      const before = NodeFS.statSync(file, { bigint: true });
+-      const contents = NodeFS.readFileSync(file, "utf8");
+-      const after = NodeFS.statSync(file, { bigint: true });
+-      if (before.ino !== after.ino || before.mtimeNs !== after.mtimeNs) return;
+-      // Nested/concurrent launchers see the same summary; stable ids prevent double counting.
+-      const id = NodeCrypto.createHash("sha256")
+-        .update(`${host}\0${root}\0${before.ino}\0${before.mtimeNs}\0${contents}`)
+-        .digest("hex");
+-      if (seen.has(id)) return;
+-      seen.add(id);
+-      if (!enqueue) return;
+-      const tasks = summarize(JSON.parse(contents));
+-      if (!tasks.length) return;
+-      const event: SummaryEvent = {
+-        id,
+-        recordedAt: Number(before.mtimeNs / 1_000_000n),
+-        host: host.slice(0, 256),
+-        platform: NodeOS.platform(),
+-        arch: NodeOS.arch(),
+-        ci: env.GITHUB_ACTIONS === "true",
+-        runId: env.GITHUB_RUN_ID || "",
+-        tasks,
+-      };
+-      NodeFS.mkdirSync(queue, { recursive: true, mode: 0o700 });
+-      const temporary = NodePath.join(queue, `${id}.${process.pid}.tmp`);
+-      NodeFS.writeFileSync(temporary, JSON.stringify({ endpoint, event }), { mode: 0o600 });
+-      NodeFS.renameSync(temporary, NodePath.join(queue, `${id}.json`));
+-    } catch {
+-      /* Telemetry must never prevent task execution. */
+-    }
+-  };
+-  const scan = (enqueue: boolean) => {
+-    for (const entry of NodeFS.readdirSync(cache, { withFileTypes: true })) {
+-      if (entry.isDirectory())
+-        snapshot(NodePath.join(cache, entry.name, "last-summary.json"), enqueue);
+-    }
+-  };
+-  try {
+-    NodeFS.mkdirSync(cache, { recursive: true });
+-    scan(false);
+-    // Capture nested runs before the parent's atomic summary replaces them.
+-    const watcher = NodeFS.watch(cache, { recursive: true }, (_event, file) => {
+-      if (file?.endsWith("last-summary.json")) snapshot(NodePath.join(cache, file), true);
+-    });
+-    watcher.on("error", () => watcher.close());
+-    return () => {
+-      watcher.close();
+-      try {
+-        scan(true);
+-      } catch {
+-        /* A task may remove its cache directory. */
+-      }
+-    };
+-  } catch {
+-    return () => {};
+-  }
++  return () => {};
+ }
+ 
+-export async function flushTelemetry(home = NodeOS.homedir(), env = process.env) {
+-  const queue = NodePath.join(home, ".cache/t3-task-cache/telemetry");
+-  const deadline = Date.now() + 15_000;
+-  const skipped = new Set<string>();
+-  // A flusher that finds the lock taken exits and leaves its event to the holder. Re-check after
+-  // releasing, or an event queued after the holder's last scan waits for the next command.
+-  try {
+-    while (
+-      (await drainTelemetry(queue, home, env, deadline, skipped)) &&
+-      Date.now() < deadline &&
+-      NodeFS.readdirSync(queue).some((entry) => entry.endsWith(".json") && !skipped.has(entry))
+-    );
+-  } catch {
+-    /* Leave unsent events for a later invocation. */
+-  }
+-}
+-
+-async function drainTelemetry(
+-  queue: string,
+-  home: string,
+-  env: NodeJS.ProcessEnv,
+-  deadline: number,
+-  skipped: Set<string>,
+-) {
+-  const lock = NodePath.join(queue, "flush.lock");
+-  try {
+-    NodeFS.mkdirSync(queue, { recursive: true, mode: 0o700 });
+-    try {
+-      if (Date.now() - NodeFS.statSync(lock).mtimeMs > 60_000) NodeFS.rmdirSync(lock);
+-    } catch {
+-      /* No previous flusher. */
+-    }
+-    NodeFS.mkdirSync(lock);
+-  } catch {
+-    return false;
+-  }
+-  try {
+-    const files = NodeFS.readdirSync(queue)
+-      .filter((file) => file.endsWith(".json"))
+-      .sort(
+-        (a, b) =>
+-          NodeFS.statSync(NodePath.join(queue, a)).mtimeMs -
+-          NodeFS.statSync(NodePath.join(queue, b)).mtimeMs,
+-      );
+-    // Bound disk use while offline. Unsent events retry on the next invocation.
+-    for (const file of files.slice(0, Math.max(0, files.length - 2000)))
+-      NodeFS.rmSync(NodePath.join(queue, file), { force: true });
+-    const credentialsFile = NodePath.join(home, ".config/t3-task-cache/credentials.json");
+-    const credentials = NodeFS.existsSync(credentialsFile)
+-      ? JSON.parse(NodeFS.readFileSync(credentialsFile, "utf8"))
+-      : {};
+-    // Re-scan between sends so a concurrent command's final summary joins this flush.
+-    for (let sent = 0; sent < 100 && Date.now() < deadline;) {
+-      const file = NodeFS.readdirSync(queue)
+-        .filter((entry) => entry.endsWith(".json") && !skipped.has(entry))
+-        .sort()[0];
+-      if (!file) return true;
+-      const path = NodePath.join(queue, file);
+-      const { endpoint, event } = JSON.parse(NodeFS.readFileSync(path, "utf8"));
+-      const url = new URL(endpoint);
+-      const configured = env.VP_REMOTE_CACHE_URL ? new URL(env.VP_REMOTE_CACHE_URL) : undefined;
+-      const configuredEndpoint = configured && new URL(configured.href);
+-      if (configuredEndpoint) {
+-        configuredEndpoint.username = "";
+-        configuredEndpoint.password = "";
+-      }
+-      const credential =
+-        configured?.username && configuredEndpoint?.href.replace(/\/$/, "") === endpoint
+-          ? {
+-              name: decodeURIComponent(configured.username),
+-              token: decodeURIComponent(configured.password),
+-            }
+-          : credentials[endpoint];
+-      let authorization: string;
+-      if (
+-        credential &&
+-        !(
+-          env.GITHUB_ACTIONS === "true" &&
+-          env.ACTIONS_ID_TOKEN_REQUEST_URL &&
+-          env.ACTIONS_ID_TOKEN_REQUEST_TOKEN
+-        )
+-      )
+-        authorization = `Basic ${Buffer.from(`${credential.name}:${credential.token}`).toString("base64")}`;
+-      else if (env.ACTIONS_ID_TOKEN_REQUEST_URL && env.ACTIONS_ID_TOKEN_REQUEST_TOKEN) {
+-        const tokenUrl = new URL(env.ACTIONS_ID_TOKEN_REQUEST_URL);
+-        tokenUrl.searchParams.set("audience", endpoint);
+-        const response = await fetch(tokenUrl, {
+-          headers: { Authorization: `Bearer ${env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+-          signal: AbortSignal.timeout(3000),
+-        });
+-        if (!response.ok) return false;
+-        const token = (await response.json()) as { value: string };
+-        authorization = `Bearer ${token.value}`;
+-      } else {
+-        skipped.add(file);
+-        continue;
+-      }
+-      sent++;
+-      url.pathname = `${url.pathname.replace(/\/$/, "")}/telemetry`;
+-      const response = await fetch(url, {
+-        method: "POST",
+-        headers: { Authorization: authorization, "Content-Type": "application/json" },
+-        body: JSON.stringify(event),
+-        signal: AbortSignal.timeout(3000),
+-      });
+-      await response.body?.cancel();
+-      if (response.ok || [400, 401, 403, 413].includes(response.status)) NodeFS.unlinkSync(path);
+-      else return false;
+-    }
+-  } catch {
+-    /* Leave unsent events for a later invocation. */
+-  } finally {
+-    NodeFS.rmdirSync(lock);
+-  }
+-}
++export async function flushTelemetry(_home = NodeOS.homedir(), _env = process.env) {}
+diff --git a/infra/task-cache/src/worker.ts b/infra/task-cache/src/worker.ts
+index f386603ff6..e05caa181d 100644
+--- a/infra/task-cache/src/worker.ts
++++ b/infra/task-cache/src/worker.ts
+@@ -1,5 +1,3 @@
+-import * as Axiom from "@alchemy.run/axiom";
+-import { Observability } from "./observability.ts";
+ import * as Cloudflare from "@alchemy.run/cloudflare";
+ import * as Config from "effect/Config";
+ import * as Effect from "effect/Effect";
+@@ -105,11 +103,6 @@ export const layer = Worker.make(
+       Cloudflare.R2.ReadWriteBucketBinding,
+       Cloudflare.Workers.RateLimitBinding,
+       Cloudflare.Workers.CronEventSourceLive,
+-      Layer.unwrap(
+-        Effect.map(Observability, ({ traces, token }) =>
+-          Axiom.Telemetry({ serviceName: "t3-task-cache", traces, token }),
+-        ),
+-      ),
+     ]),
+   ),
+ );
+diff --git a/packages/client-runtime/src/authorization/remote.test.ts b/packages/client-runtime/src/authorization/remote.test.ts
+index d63110e37b..b1276b0d74 100644
+--- a/packages/client-runtime/src/authorization/remote.test.ts
++++ b/packages/client-runtime/src/authorization/remote.test.ts
+@@ -3,7 +3,6 @@ import * as Effect from "effect/Effect";
+ import * as Schema from "effect/Schema";
+ 
+ import { EnvironmentAuthInvalidError } from "@t3tools/contracts";
+-import { hashTelemetryId } from "@t3tools/shared/telemetryId";
+ import {
+   bootstrapRemoteBearerSession,
+   exchangeRemoteDpopAccessToken,
+@@ -314,7 +313,7 @@ describe("remote environment authorization", () => {
+     }),
+   );
+ 
+-  it.effect("names the signed-in Connect account and this device by hash only", () =>
++  it.effect("omits analytics ownership even with a signed-in account and device", () =>
+     Effect.gen(function* () {
+       const fetch = recordedFetch(
+         Response.json({ ticket: "ws-ticket", expiresAt: "2026-05-01T12:05:00.000Z" }),
+@@ -340,8 +339,8 @@ describe("remote environment authorization", () => {
+         ),
+       );
+ 
+-      expect(url.searchParams.get("clientOwner")).toBe(hashTelemetryId("user_connect"));
+-      expect(url.searchParams.get("clientDevice")).toBe(hashTelemetryId("device-1"));
++      expect(url.searchParams.get("clientOwner")).toBeNull();
++      expect(url.searchParams.get("clientDevice")).toBeNull();
+       expect(url.toString()).not.toContain("user_connect");
+       expect(url.toString()).not.toContain("device-1");
+     }),
+diff --git a/packages/client-runtime/src/authorization/remote.ts b/packages/client-runtime/src/authorization/remote.ts
+index 844399299d..a41d1d3df3 100644
+--- a/packages/client-runtime/src/authorization/remote.ts
++++ b/packages/client-runtime/src/authorization/remote.ts
+@@ -9,13 +9,10 @@ import {
+   type AuthWebSocketTicketUse,
+ } from "@t3tools/contracts";
+ import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
+-import { hashTelemetryId } from "@t3tools/shared/telemetryId";
+ import * as Effect from "effect/Effect";
+-import * as Option from "effect/Option";
+ import * as Redacted from "effect/Redacted";
+ import * as Schema from "effect/Schema";
+ import { environmentEndpointUrl } from "../environment/endpoint.ts";
+-import * as ClientCapabilities from "../platform/capabilities.ts";
+ import {
+   executeEnvironmentHttpRequest,
+   makeEnvironmentHttpApiGroupClient,
+@@ -52,21 +49,13 @@ export interface ClientOwnerParams {
+  * Tells the environment, for analytics, which T3 Connect account and device
+  * are connecting, so it can count the environment as theirs.
+  */
+-export const readClientOwnerParams = Effect.gen(function* () {
+-  const session = yield* Effect.serviceOption(ClientCapabilities.CloudSession);
+-  const account = Option.isSome(session) ? yield* session.value.identity : Option.none();
+-  const device = yield* (yield* ClientCapabilities.AnalyticsDevice).id;
+-  return {
+-    ...(Option.isSome(account) ? { connect: hashTelemetryId(account.value.accountId) } : {}),
+-    ...(Option.isSome(device) ? { device: hashTelemetryId(device.value) } : {}),
+-  } satisfies ClientOwnerParams;
+-});
++export const readClientOwnerParams: Effect.Effect<ClientOwnerParams> = Effect.succeed({});
+ 
+ export const appendClientConnectionParams = (
+   url: URL,
+   clientMetadata: AuthClientPresentationMetadata | undefined,
+   connectionMethod?: ClientConnectionMethod,
+-  owners?: ClientOwnerParams,
++  _owners?: ClientOwnerParams,
+ ): void => {
+   if (clientMetadata?.surface) {
+     url.searchParams.set("clientSurface", clientMetadata.surface);
+@@ -105,12 +94,6 @@ export const appendClientConnectionParams = (
+   if (connectionMethod) {
+     url.searchParams.set("connectionMethod", connectionMethod);
+   }
+-  if (owners?.connect) {
+-    url.searchParams.set("clientOwner", owners.connect);
+-  }
+-  if (owners?.device) {
+-    url.searchParams.set("clientDevice", owners.device);
+-  }
+ };
+ 
+ export const exchangeRemoteDpopAccessToken = Effect.fn(
+diff --git a/packages/provider-core/src/server/instanceEnvironment.test.ts b/packages/provider-core/src/server/instanceEnvironment.test.ts
+index a2f27dcf3e..2ee3688229 100644
+--- a/packages/provider-core/src/server/instanceEnvironment.test.ts
++++ b/packages/provider-core/src/server/instanceEnvironment.test.ts
+@@ -7,6 +7,16 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
+ 
+ import { mergeProviderInstanceEnvironment } from "./instanceEnvironment.ts";
+ 
++const privacyEnvironment = {
++  DO_NOT_TRACK: "1",
++  CLERK_TELEMETRY_DISABLED: "1",
++  DISABLE_TELEMETRY: "1",
++  DISABLE_ERROR_REPORTING: "1",
++  OTEL_SDK_DISABLED: "true",
++  T3CODE_OTEL_SDK_DISABLED: "true",
++  T3CODE_TELEMETRY_ENABLED: "false",
++};
++
+ describe("mergeProviderInstanceEnvironment", () => {
+   it.effect.each([
+     { value: "~/.account", tail: ".account" },
+@@ -30,6 +40,7 @@ describe("mergeProviderInstanceEnvironment", () => {
+       );
+ 
+       expect(environment).toEqual({
++        ...privacyEnvironment,
+         CODEX_HOME: path.join("/home/ada", tail),
+         CLAUDE_CONFIG_DIR: path.join("/home/ada", tail),
+         GROK_HOME: path.join("/home/ada", tail),
+@@ -55,7 +66,7 @@ describe("mergeProviderInstanceEnvironment", () => {
+           [{ name: "CUSTOM_VALUE", value: "~/.custom", sensitive: false }],
+           baseEnv,
+         ),
+-      ).toEqual({ ...baseEnv, CUSTOM_VALUE: "~/.custom" });
++      ).toEqual({ ...privacyEnvironment, ...baseEnv, CUSTOM_VALUE: "~/.custom" });
+     }),
+   );
+ 
+@@ -123,6 +134,7 @@ describe("mergeProviderInstanceEnvironment", () => {
+         });
+ 
+         expect(merged).toEqual({
++          ...privacyEnvironment,
+           PATH: ":/usr/bin",
+           LD_LIBRARY_PATH: keptLibraryPath,
+           XDG_DATA_DIRS: "/usr/share",
+@@ -147,10 +159,15 @@ describe("mergeProviderInstanceEnvironment", () => {
+           Effect.provideService(HostProcess.Platform, "win32"),
+           Effect.provideService(HostProcess.HomeDirectory, "/home/ada"),
+         ),
+-      ).toEqual({ CODEX_HOME: "/home/ada/corp" });
++      ).toEqual({ ...privacyEnvironment, CODEX_HOME: "/home/ada/corp" });
+       // Upper case sorts first, so it also wins where a spawn merges the parent environment back.
+-      expect(yield* merge("win32")).toEqual({ HTTPS_PROXY: "http://gateway", PATH: "/bin" });
++      expect(yield* merge("win32")).toEqual({
++        ...privacyEnvironment,
++        HTTPS_PROXY: "http://gateway",
++        PATH: "/bin",
++      });
+       expect(yield* merge("linux")).toEqual({
++        ...privacyEnvironment,
+         HTTPS_PROXY: "http://mine",
+         Https_Proxy: "http://gateway",
+         PATH: "/bin",
+@@ -158,3 +175,22 @@ describe("mergeProviderInstanceEnvironment", () => {
+     }),
+   );
+ });
++
++it.effect("cannot re-enable known provider telemetry with host or instance environment", () =>
++  Effect.gen(function* () {
++    const environment = yield* mergeProviderInstanceEnvironment(
++      [
++        { name: "otel_sdk_disabled", value: "false", sensitive: false },
++        { name: "T3CODE_TELEMETRY_ENABLED", value: "true", sensitive: false },
++        { name: "DISABLE_ERROR_REPORTING", value: "0", sensitive: false },
++      ],
++      { OTEL_SDK_DISABLED: "false", OPENAI_API_KEY: "preserved", PATH: "/bin" },
++    );
++    expect(environment).toMatchObject({
++      ...privacyEnvironment,
++      OPENAI_API_KEY: "preserved",
++      PATH: "/bin",
++    });
++    expect(environment).not.toHaveProperty("otel_sdk_disabled");
++  }),
++);
+diff --git a/packages/provider-core/src/server/instanceEnvironment.ts b/packages/provider-core/src/server/instanceEnvironment.ts
+index 06c8daa081..7471e56835 100644
+--- a/packages/provider-core/src/server/instanceEnvironment.ts
++++ b/packages/provider-core/src/server/instanceEnvironment.ts
+@@ -5,6 +5,22 @@ import * as Effect from "effect/Effect";
+ 
+ import { expandHomeVariable } from "./pathExpansion.ts";
+ 
++const withoutTelemetry = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
++  const disabled: Record<string, string> = {
++    DO_NOT_TRACK: "1",
++    CLERK_TELEMETRY_DISABLED: "1",
++    DISABLE_TELEMETRY: "1",
++    DISABLE_ERROR_REPORTING: "1",
++    OTEL_SDK_DISABLED: "true",
++    T3CODE_OTEL_SDK_DISABLED: "true",
++    T3CODE_TELEMETRY_ENABLED: "false",
++  };
++  const next = Object.fromEntries(
++    Object.entries(env).filter(([name]) => !Object.hasOwn(disabled, name.toUpperCase())),
++  );
++  return { ...next, ...disabled };
++};
++
+ export const mergeProviderInstanceEnvironment = Effect.fn(function* (
+   environment: ProviderInstanceEnvironment | undefined,
+   baseEnv: NodeJS.ProcessEnv = process.env,
+@@ -12,7 +28,7 @@ export const mergeProviderInstanceEnvironment = Effect.fn(function* (
+   // Commands the agent runs inherit this env; the AppImage mount's libraries would shadow the system's.
+   const hostEnv = stripAppImageRuntimeEnv(baseEnv);
+   if (!environment || environment.length === 0) {
+-    return hostEnv;
++    return withoutTelemetry(hostEnv);
+   }
+ 
+   const home = yield* HostProcess.HomeDirectory;
+@@ -32,5 +48,5 @@ export const mergeProviderInstanceEnvironment = Effect.fn(function* (
+     }
+     next[name] = expandHomeVariable(name, variable.value, home);
+   }
+-  return next;
++  return withoutTelemetry(next);
+ });
+diff --git a/packages/shared/src/otelEnvironment.test.ts b/packages/shared/src/otelEnvironment.test.ts
+index 746beabff7..3ac5627168 100644
+--- a/packages/shared/src/otelEnvironment.test.ts
++++ b/packages/shared/src/otelEnvironment.test.ts
+@@ -1,466 +1,44 @@
+-import { assert, describe, it } from "@effect/vitest";
++import { assert, describe, expect, it } from "@effect/vitest";
+ import * as ConfigProvider from "effect/ConfigProvider";
+ import * as Effect from "effect/Effect";
+-import * as Layer from "effect/Layer";
+-import * as OtlpResource from "effect/observability/OtlpResource";
+-
+-import * as OtelEnvironment from "./otelEnvironment.ts";
+-
+-const load = (env: Record<string, string>) =>
+-  OtelEnvironment.load.pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env }))));
+-
+-const SPEC_OFF =
+-  "OTEL_SDK_DISABLED is set, so no telemetry is exported, whatever configured it; set T3CODE_OTEL_SDK_DISABLED=false to export anyway";
+-const T3_OFF =
+-  "T3CODE_OTEL_SDK_DISABLED is set, so no telemetry is exported, whatever configured it";
+-const specIgnored = (value: string) =>
+-  `OTEL_SDK_DISABLED=${value} was read as false; the OpenTelemetry specification recognizes only the string true, so use OTEL_SDK_DISABLED=true or T3CODE_OTEL_SDK_DISABLED to say it any other way`;
+-
+-describe("OtelEnvironment", () => {
+-  it.effect.each([
+-    { name: "nothing set", env: {}, disabled: false, warnings: [] },
+-    { name: "spec true", env: { OTEL_SDK_DISABLED: "true" }, disabled: true, warnings: [SPEC_OFF] },
+-    {
+-      name: "spec 1",
+-      env: { OTEL_SDK_DISABLED: "1" },
+-      disabled: false,
+-      warnings: [specIgnored("1")],
+-    },
+-    { name: "t3 1", env: { T3CODE_OTEL_SDK_DISABLED: "1" }, disabled: true, warnings: [T3_OFF] },
+-    {
+-      name: "t3 false overrides spec true",
+-      env: { T3CODE_OTEL_SDK_DISABLED: "false", OTEL_SDK_DISABLED: "true" },
+-      disabled: false,
+-      warnings: [],
+-    },
+-    {
+-      name: "unreadable t3 warns and falls through",
+-      env: { T3CODE_OTEL_SDK_DISABLED: "maybe", OTEL_SDK_DISABLED: "true" },
+-      disabled: true,
+-      warnings: ["T3CODE_OTEL_SDK_DISABLED=maybe is not a yes or a no and was ignored", SPEC_OFF],
+-    },
+-  ])("$name", ({ env, disabled, warnings }) =>
+-    Effect.gen(function* () {
+-      const resolved = yield* load(env);
+-      assert.strictEqual(resolved.disabled, disabled);
+-      assert.deepStrictEqual(resolved.warnings, warnings);
+-    }),
+-  );
+-
+-  it.effect.each([
+-    {
+-      name: "a percent-encoded list",
+-      env: { OTEL_RESOURCE_ATTRIBUTES: "team=core,message=hello%20world" },
+-      resourceAttributes: { team: "core", message: "hello world" },
+-      warnings: [],
+-    },
+-    {
+-      name: "a list that does not decode",
+-      env: { OTEL_RESOURCE_ATTRIBUTES: "team=core,broken=%zz" },
+-      resourceAttributes: {},
+-      warnings: [
+-        "OTEL_RESOURCE_ATTRIBUTES is not a list of percent-encoded key=value pairs and was ignored",
+-      ],
+-    },
+-  ])("resource attributes: $name", ({ env, resourceAttributes, warnings }) =>
+-    Effect.gen(function* () {
+-      const resolved = yield* load(env);
+-      assert.deepStrictEqual(resolved.resourceAttributes, resourceAttributes);
+-      assert.deepStrictEqual(resolved.warnings, warnings);
+-    }),
+-  );
+-
+-  describe("endpoints", () => {
+-    const urlOf = (signal: OtelEnvironment.OtelSignal) =>
+-      OtelEnvironment.OtelSignal.$match(signal, {
+-        Export: ({ url }) => url,
+-        Off: () => "Off",
+-        Unset: () => "Unset",
+-      });
+-    it.effect.each([
+-      {
+-        name: "generic endpoint appends each signal's path, keeping the query",
+-        env: { OTEL_EXPORTER_OTLP_ENDPOINT: "https://collector:4318/base?api_key=secret" },
+-        traces: "https://collector:4318/base/v1/traces?api_key=secret",
+-        metrics: "https://collector:4318/base/v1/metrics?api_key=secret",
+-        logs: "https://collector:4318/base/v1/logs?api_key=secret",
+-        warnings: [],
+-      },
+-      {
+-        name: "a per-signal endpoint is used verbatim",
+-        env: { OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "https://tempo:4318/custom" },
+-        traces: "https://tempo:4318/custom",
+-        metrics: "Unset",
+-        logs: "Unset",
+-        warnings: [],
+-      },
+-      {
+-        name: "a per-signal endpoint beats the generic one",
+-        env: {
+-          OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "https://tempo:4318/custom",
+-          OTEL_EXPORTER_OTLP_ENDPOINT: "https://collector:4318/base",
+-        },
+-        traces: "https://tempo:4318/custom",
+-        metrics: "https://collector:4318/base/v1/metrics",
+-        logs: "https://collector:4318/base/v1/logs",
+-        warnings: [],
+-      },
+-      {
+-        name: "a blank per-signal endpoint falls through to the generic one",
+-        env: {
+-          OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "  ",
+-          OTEL_EXPORTER_OTLP_ENDPOINT: "https://collector:4318/base",
+-        },
+-        traces: "https://collector:4318/base/v1/traces",
+-        metrics: "https://collector:4318/base/v1/metrics",
+-        logs: "https://collector:4318/base/v1/logs",
+-        warnings: [],
+-      },
+-      {
+-        name: "an invalid per-signal endpoint warns and does not fall through",
+-        env: {
+-          OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "not-a-url",
+-          OTEL_EXPORTER_OTLP_ENDPOINT: "https://collector:4318/base",
+-        },
+-        traces: "Off",
+-        metrics: "https://collector:4318/base/v1/metrics",
+-        logs: "https://collector:4318/base/v1/logs",
+-        warnings: [
+-          "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is not an http or https URL, so the signals it configures are not exported",
+-        ],
+-      },
+-      {
+-        name: "an invalid generic endpoint warns without leaking its query",
+-        env: { OTEL_EXPORTER_OTLP_ENDPOINT: "not-a-url?api_key=secret" },
+-        traces: "Off",
+-        metrics: "Off",
+-        logs: "Off",
+-        warnings: [
+-          "OTEL_EXPORTER_OTLP_ENDPOINT is not an http or https URL, so the signals it configures are not exported",
+-        ],
+-      },
+-      {
+-        name: "the kill switch wins outright over a valid endpoint",
+-        env: {
+-          T3CODE_OTEL_SDK_DISABLED: "true",
+-          OTEL_EXPORTER_OTLP_ENDPOINT: "https://collector:4318/base",
+-        },
+-        traces: "Unset",
+-        metrics: "Unset",
+-        logs: "Unset",
+-        warnings: [T3_OFF],
+-      },
+-      {
+-        name: "an exporter of none turns off only its signal",
+-        env: {
+-          OTEL_EXPORTER_OTLP_ENDPOINT: "https://collector:4318",
+-          OTEL_LOGS_EXPORTER: "none",
+-        },
+-        traces: "https://collector:4318/v1/traces",
+-        metrics: "https://collector:4318/v1/metrics",
+-        logs: "Off",
+-        warnings: [],
+-      },
+-    ])("$name", ({ env, traces, metrics, logs, warnings }) =>
+-      Effect.gen(function* () {
+-        const resolved = yield* load(env);
+-        assert.strictEqual(urlOf(resolved.traces), traces);
+-        assert.strictEqual(urlOf(resolved.metrics), metrics);
+-        assert.strictEqual(urlOf(resolved.logs), logs);
+-        assert.deepStrictEqual(resolved.warnings, warnings);
+-      }),
+-    );
+-
+-    const ENDPOINT = { OTEL_EXPORTER_OTLP_ENDPOINT: "https://collector:4318" };
+-    const exportOf = (signal: OtelEnvironment.OtelSignal): unknown =>
+-      OtelEnvironment.OtelSignal.$match(signal, {
+-        Export: ({ protocol, headers }) => ({ protocol, headers }),
+-        Off: () => "Off",
+-        Unset: () => "Unset",
+-      });
+-    it.effect.each([
+-      {
+-        name: "a per-signal protocol and headers beat the generic ones",
+-        env: {
+-          ...ENDPOINT,
+-          OTEL_EXPORTER_OTLP_PROTOCOL: "http/json",
+-          OTEL_EXPORTER_OTLP_HEADERS: "api-key=shared",
+-          OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: "http/protobuf",
+-          OTEL_EXPORTER_OTLP_TRACES_HEADERS: "api-key=traces%20only",
+-        },
+-        traces: { protocol: "http/protobuf", headers: { "api-key": "traces only" } },
+-        logs: { protocol: "http/json", headers: { "api-key": "shared" } },
+-        warnings: [],
+-      },
+-      {
+-        name: "an unsupported protocol turns off the signals it configures",
+-        env: { ...ENDPOINT, OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: "grpc" },
+-        traces: { protocol: "http/protobuf", headers: undefined },
+-        logs: "Off",
+-        warnings: [
+-          "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL is not http/protobuf or http/json, so the signals it configures are not exported",
+-        ],
+-      },
+-      {
+-        name: "undecodable headers turn off every signal once, without leaking them",
+-        env: { ...ENDPOINT, OTEL_EXPORTER_OTLP_HEADERS: "api-key=%zz" },
+-        traces: "Off",
+-        logs: "Off",
+-        warnings: [
+-          "OTEL_EXPORTER_OTLP_HEADERS is not a list of key=value pairs with percent-encoded values, so the signals it configures are not exported",
+-        ],
+-      },
+-    ])("$name", ({ env, traces, logs, warnings }) =>
+-      Effect.gen(function* () {
+-        const resolved = yield* load(env);
+-        assert.deepStrictEqual(exportOf(resolved.traces), traces);
+-        assert.deepStrictEqual(exportOf(resolved.logs), logs);
+-        assert.deepStrictEqual(resolved.warnings, warnings);
+-      }),
+-    );
+-  });
+-
+-  it.effect("names the variable each signal's endpoint came from", () =>
+-    Effect.gen(function* () {
+-      const otel = yield* load({
+-        OTEL_EXPORTER_OTLP_ENDPOINT: "https://collector:4318",
+-        OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "https://tempo:4318/v1/traces",
+-      });
+-      const variableOf = (signal: OtelEnvironment.OtelSignal) =>
+-        OtelEnvironment.OtelSignal.$match(signal, {
+-          Export: ({ variable }) => variable,
+-          Off: () => undefined,
+-          Unset: () => undefined,
+-        });
+-      assert.strictEqual(variableOf(otel.traces), "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT");
+-      assert.strictEqual(variableOf(otel.metrics), "OTEL_EXPORTER_OTLP_ENDPOINT");
+-      assert.strictEqual(variableOf(otel.logs), "OTEL_EXPORTER_OTLP_ENDPOINT");
+-    }),
+-  );
+-
+-  describe("resolveSignalEndpoint", () => {
+-    const t3Export = {
+-      protocol: "http/json",
+-      headers: { "x-key": "t3" },
+-      exportIntervalMs: 5_000,
+-    } as const;
+-    const withLogs = (logs: OtelEnvironment.OtelSignal, disabled = false) => ({
+-      ...OtelEnvironment.none,
+-      disabled,
+-      logs,
+-    });
+-    const otelExport = OtelEnvironment.OtelSignal.Export({
+-      url: "http://otel:4318/v1/logs",
+-      variable: "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+-      protocol: "http/protobuf",
+-      headers: { "x-key": "otel" },
+-    });
+-    it.each([
+-      {
+-        name: "T3CODE_OTLP_*_URL wins over a signal the OTEL variables turned off",
+-        otel: withLogs(OtelEnvironment.OtelSignal.Off()),
+-        t3Url: "http://t3:4318/v1/logs",
+-        expected: {
+-          url: "http://t3:4318/v1/logs",
+-          export: t3Export,
+-          source: "environment" as const,
+-          variable: "T3CODE_OTLP_LOGS_URL",
+-        },
+-      },
+-      {
+-        name: "an OTEL endpoint brings its headers and protocol over the fallback",
+-        otel: withLogs(otelExport),
+-        t3Url: " ",
+-        expected: {
+-          url: "http://otel:4318/v1/logs",
+-          export: {
+-            protocol: "http/protobuf" as const,
+-            headers: { "x-key": "otel" },
+-            exportIntervalMs: 5_000,
+-          },
+-          source: "environment" as const,
+-          variable: "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+-        },
+-      },
+-      {
+-        name: "a signal the OTEL variables turned off does not fall through",
+-        otel: withLogs(OtelEnvironment.OtelSignal.Off()),
+-        t3Url: undefined,
+-        expected: undefined,
+-      },
+-      {
+-        name: "an unset signal takes the first non-blank fallback",
+-        otel: withLogs(OtelEnvironment.OtelSignal.Unset()),
+-        t3Url: undefined,
+-        expected: {
+-          url: "http://settings:4318/v1/logs",
+-          export: t3Export,
+-          source: "settings" as const,
+-        },
+-      },
+-      {
+-        name: "a desktop bootstrap URL that differs from the setting wins as the desktop's own",
+-        otel: withLogs(OtelEnvironment.OtelSignal.Unset()),
+-        t3Url: undefined,
+-        bootstrapUrl: "http://desktop:4318/v1/logs",
+-        expected: {
+-          url: "http://desktop:4318/v1/logs",
+-          export: t3Export,
+-          source: "bootstrap" as const,
+-        },
+-      },
+-      {
+-        name: "a desktop bootstrap URL that forwards the setting counts as the setting",
+-        otel: withLogs(OtelEnvironment.OtelSignal.Unset()),
+-        t3Url: undefined,
+-        bootstrapUrl: " http://settings:4318/v1/logs ",
+-        expected: {
+-          url: "http://settings:4318/v1/logs",
+-          export: t3Export,
+-          source: "settings" as const,
+-        },
+-      },
+-    ])("$name", ({ otel, t3Url, bootstrapUrl = "", expected }) => {
+-      assert.deepStrictEqual(
+-        OtelEnvironment.resolveSignalEndpoint(
+-          otel,
+-          "logs",
+-          { url: t3Url, export: t3Export },
+-          { bootstrapUrl, settingsUrl: "http://settings:4318/v1/logs" },
++import { DEFAULT_SIGNAL_EXPORT } from "./observability.ts";
++import * as Otel from "./otelEnvironment.ts";
++
++it.effect.each([
++  {},
++  { T3CODE_TELEMETRY_ENABLED: "true" },
++  { T3CODE_OTEL_SDK_DISABLED: "false", OTEL_SDK_DISABLED: "false" },
++  { OTEL_EXPORTER_OTLP_ENDPOINT: "https://collector.example" },
++  { T3CODE_TELEMETRY_ENABLED: "true", CI: "true", OTEL_TRACES_EXPORTER: "otlp" },
++])("never enables exports, regardless of environment (%j)", (env) =>
++  Effect.gen(function* () {
++    const otel = yield* Otel.load.pipe(
++      Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnvRecord(env))),
++    );
++    expect(otel.disabled).toBe(true);
++    expect(Otel.isRelayTracingEnabled(env)).toBe(false);
++    for (const signal of ["traces", "metrics", "logs"] as const) {
++      expect(
++        Otel.resolveSignalEndpoint(
++          { ...otel, disabled: false },
++          signal,
++          { url: "https://explicit.example", export: DEFAULT_SIGNAL_EXPORT },
++          { bootstrapUrl: "https://bootstrap.example", settingsUrl: "https://saved.example" },
+         ),
+-        expected,
+-      );
+-    });
+-  });
+-
+-  it.effect("an exporter of none keeps the Settings endpoint from re-enabling its signal", () =>
+-    Effect.gen(function* () {
+-      const otel = yield* load({ OTEL_LOGS_EXPORTER: "none" });
+-      const t3 = {
+-        url: undefined,
+-        export: { protocol: "http/json", headers: undefined, exportIntervalMs: 10_000 },
+-      } as const;
+-      assert.strictEqual(
+-        OtelEnvironment.resolveSignalEndpoint(otel, "logs", t3, {
+-          bootstrapUrl: undefined,
+-          settingsUrl: "http://settings:4318/v1/logs",
+-        }),
+-        undefined,
+-      );
+-      assert.strictEqual(
+-        OtelEnvironment.resolveSignalEndpoint(otel, "traces", t3, {
+-          bootstrapUrl: undefined,
+-          settingsUrl: "http://settings:4318/v1/traces",
+-        })?.url,
+-        "http://settings:4318/v1/traces",
+-      );
+-    }),
+-  );
+-
+-  describe("layerResourceAttributes", () => {
+-    it.effect.each([
+-      { name: "a list that does not decode", raw: "team=%zz", attributes: [] },
+-      { name: "encoded separators", raw: "a%2Cb=x%3Dy", attributes: ["a,b"] },
+-    ])("lets the exporters' own read succeed with $name", ({ raw, attributes }) =>
+-      Effect.gen(function* () {
+-        const layerEnv = ConfigProvider.layer(
+-          ConfigProvider.fromEnv({ env: { OTEL_RESOURCE_ATTRIBUTES: raw } }),
+-        );
+-        const otel = yield* OtelEnvironment.load.pipe(Effect.provide(layerEnv));
+-        const resource = yield* OtlpResource.fromConfig({ serviceName: "t3" }).pipe(
+-          Effect.provide(
+-            Layer.provide(
+-              OtelEnvironment.layerResourceAttributes(otel.resourceAttributes),
+-              layerEnv,
+-            ),
+-          ),
+-        );
+-        assert.deepStrictEqual(
+-          resource.attributes
+-            .map((attribute) => attribute.key)
+-            .filter((key) => !key.startsWith("telemetry.sdk.")),
+-          [...attributes, "service.name"],
+-        );
+-      }),
+-    );
+-  });
+-});
++      ).toBeUndefined();
++    }
++  }),
++);
+ 
+ describe("isCiEnvironment", () => {
+   it("treats a set CI variable as CI, except empty, false, and 0", () => {
+-    assert.isFalse(OtelEnvironment.isCiEnvironment({}));
+-    assert.isTrue(OtelEnvironment.isCiEnvironment({ CI: "1" }));
+-    assert.isTrue(OtelEnvironment.isCiEnvironment({ TF_BUILD: "True" }));
+-    assert.isTrue(OtelEnvironment.isCiEnvironment({ BITBUCKET_BUILD_NUMBER: "42" }));
++    assert.isFalse(Otel.isCiEnvironment({}));
++    assert.isTrue(Otel.isCiEnvironment({ CI: "1" }));
++    assert.isTrue(Otel.isCiEnvironment({ TF_BUILD: "True" }));
++    assert.isTrue(Otel.isCiEnvironment({ BITBUCKET_BUILD_NUMBER: "42" }));
+     for (const value of ["", " ", "false", "FALSE", "0"]) {
+-      assert.isFalse(OtelEnvironment.isCiEnvironment({ CI: value }), `CI=${value}`);
++      assert.isFalse(Otel.isCiEnvironment({ CI: value }), `CI=${value}`);
+     }
+-    assert.isTrue(OtelEnvironment.isCiEnvironment({ CI: "false", GITLAB_CI: "true" }));
+-  });
+-});
+-
+-describe("isRelayTracingEnabled", () => {
+-  it("turns off for DO_NOT_TRACK, even when T3 telemetry is on", () => {
+-    assert.isFalse(OtelEnvironment.isRelayTracingEnabled({ DO_NOT_TRACK: "1" }));
+-    assert.isFalse(
+-      OtelEnvironment.isRelayTracingEnabled({
+-        DO_NOT_TRACK: "true",
+-        T3CODE_TELEMETRY_ENABLED: "1",
+-      }),
+-    );
+-    assert.isTrue(OtelEnvironment.isRelayTracingEnabled({ DO_NOT_TRACK: "0" }));
+-    assert.isTrue(OtelEnvironment.isRelayTracingEnabled({ DO_NOT_TRACK: "" }));
+-  });
+-
+-  it("defaults on and respects the T3CODE SDK override of the standard kill switch", () => {
+-    assert.isTrue(OtelEnvironment.isRelayTracingEnabled({}));
+-    assert.isFalse(OtelEnvironment.isRelayTracingEnabled({ OTEL_SDK_DISABLED: "true" }));
+-    assert.isTrue(
+-      OtelEnvironment.isRelayTracingEnabled({
+-        OTEL_SDK_DISABLED: "true",
+-        T3CODE_OTEL_SDK_DISABLED: "false",
+-      }),
+-    );
+-    assert.isFalse(
+-      OtelEnvironment.isRelayTracingEnabled({
+-        OTEL_SDK_DISABLED: "false",
+-        T3CODE_OTEL_SDK_DISABLED: "true",
+-      }),
+-    );
+-  });
+-
+-  it("is off on a CI runner unless T3CODE_TELEMETRY_ENABLED turns it on", () => {
+-    assert.isFalse(OtelEnvironment.isRelayTracingEnabled({ CI: "true" }));
+-    assert.isFalse(OtelEnvironment.isRelayTracingEnabled({ JENKINS_URL: "https://ci.example" }));
+-    assert.isTrue(
+-      OtelEnvironment.isRelayTracingEnabled({ CI: "true", T3CODE_TELEMETRY_ENABLED: "true" }),
+-    );
+-    assert.isFalse(
+-      OtelEnvironment.isRelayTracingEnabled({ CI: "true", T3CODE_TELEMETRY_ENABLED: "false" }),
+-    );
++    assert.isTrue(Otel.isCiEnvironment({ CI: "false", GITLAB_CI: "true" }));
+   });
+-
+-  it.effect("product opt-out beats SDK enable without disabling user-configured tracing", () =>
+-    Effect.gen(function* () {
+-      const env = {
+-        T3CODE_TELEMETRY_ENABLED: "false",
+-        T3CODE_OTEL_SDK_DISABLED: "false",
+-        OTEL_SDK_DISABLED: "true",
+-        OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "https://user.example.test/v1/traces",
+-      };
+-      assert.isFalse(OtelEnvironment.isRelayTracingEnabled(env));
+-
+-      const otel = yield* load(env);
+-      assert.isFalse(otel.disabled);
+-      assert.deepStrictEqual(
+-        otel.traces,
+-        OtelEnvironment.OtelSignal.Export({
+-          url: env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
+-          variable: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+-          protocol: "http/protobuf",
+-          headers: undefined,
+-        }),
+-      );
+-    }),
+-  );
+ });
+diff --git a/packages/shared/src/otelEnvironment.ts b/packages/shared/src/otelEnvironment.ts
+index 29267c6344..8e8276ead8 100644
+--- a/packages/shared/src/otelEnvironment.ts
++++ b/packages/shared/src/otelEnvironment.ts
+@@ -10,6 +10,9 @@ import type { OtlpEndpointSource } from "@t3tools/contracts";
+ 
+ import { OtlpHeadersFromString, OtlpProtocol, type SignalExport } from "./observability.ts";
+ 
++// Only a source change can re-enable exports in this fork.
++export const telemetryDisabled = (): boolean => true;
++
+ type OtlpSignalName = "TRACES" | "METRICS" | "LOGS";
+ 
+ export type OtelSignal = Data.TaggedEnum<{
+@@ -282,7 +285,7 @@ export const load: Effect.Effect<OtelEnvironment> = Config.all({
+   }),
+ }).pipe(
+   Effect.map(({ t3, spec, resource, generic, exporters, ...own }) => {
+-    const disabled = t3.value ?? spec.value ?? false;
++    const disabled = telemetryDisabled() || (t3.value ?? spec.value ?? false);
+     const signals = disabled
+       ? undefined
+       : {
+@@ -301,9 +304,11 @@ export const load: Effect.Effect<OtelEnvironment> = Config.all({
+     ].filter((warning) => warning !== undefined);
+     if (disabled) {
+       warnings.push(
+-        t3.value
+-          ? "T3CODE_OTEL_SDK_DISABLED is set, so no telemetry is exported, whatever configured it"
+-          : "OTEL_SDK_DISABLED is set, so no telemetry is exported, whatever configured it; set T3CODE_OTEL_SDK_DISABLED=false to export anyway",
++        telemetryDisabled()
++          ? "This fork disables all telemetry export at source level"
++          : t3.value
++            ? "T3CODE_OTEL_SDK_DISABLED is set, so no telemetry is exported, whatever configured it"
++            : "OTEL_SDK_DISABLED is set, so no telemetry is exported, whatever configured it; set T3CODE_OTEL_SDK_DISABLED=false to export anyway",
+       );
+     }
+     return {
+@@ -342,7 +347,7 @@ export const isCiEnvironment = (env: Readonly<Record<string, string | undefined>
+     return value !== undefined && value !== "" && value !== "false" && value !== "0";
+   });
+ 
+-/** The cross-tool `DO_NOT_TRACK=1` convention turns off product analytics and relay tracing. */
++/** Upstream cross-tool convention; this fork remains disabled regardless of its value. */
+ export const isDoNotTrackSet = (env: Readonly<Record<string, string | undefined>>) =>
+   T3CODE_TRUE.includes(env.DO_NOT_TRACK?.trim().toLowerCase() ?? "");
+ 
+@@ -353,8 +358,8 @@ export const isRelayTracingEnabled = (env: Readonly<Record<string, string | unde
+   }).pipe(
+     Effect.map(
+       ({ telemetry, t3, spec }) =>
++        !telemetryDisabled() &&
+         (telemetry.value ?? !isCiEnvironment(env)) &&
+-        !isDoNotTrackSet(env) &&
+         !(t3.value ?? spec.value ?? false),
+     ),
+     Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnvRecord(env))),
+@@ -378,7 +383,7 @@ export const resolveSignalEndpoint = (
+   t3: { readonly url: string | undefined; readonly export: SignalExport },
+   fallback: { readonly bootstrapUrl: string | undefined; readonly settingsUrl: string | undefined },
+ ): SignalEndpoint | undefined => {
+-  if (otel.disabled) {
++  if (telemetryDisabled() || otel.disabled) {
+     return undefined;
+   }
+   const t3Url = blankAsUnset(t3.url);
+@@ -424,7 +429,7 @@ export const layerResourceAttributes = (attributes: Readonly<Record<string, stri
+   );
+ 
+ export const none: OtelEnvironment = {
+-  disabled: false,
++  disabled: true,
+   warnings: [],
+   resourceAttributes: {},
+   traces: OtelSignal.Unset(),
+diff --git a/packages/shared/src/relayTracing.test.ts b/packages/shared/src/relayTracing.test.ts
+index 1fc027990e..db77146b48 100644
+--- a/packages/shared/src/relayTracing.test.ts
++++ b/packages/shared/src/relayTracing.test.ts
+@@ -129,13 +129,7 @@ it.effect.each([true, false])("filters relay exports at flush (%s)", (enabledAtF
+     Effect.scoped,
+     Effect.andThen(
+       Effect.sync(() => {
+-        expect(fetchFn).toHaveBeenCalledTimes(Number(enabledAtFlush));
+-        if (!enabledAtFlush) return;
+-        const sent = new TextDecoder().decode(fetchFn.mock.calls[0]?.[1]?.body as Uint8Array);
+-        expect(sent).toContain("/api/threads");
+-        expect(sent).not.toMatch(
+-          /studio-mac|cursor=secret|server\.port|private error detail|private-host/,
+-        );
++        expect(fetchFn).not.toHaveBeenCalled();
+       }),
+     ),
+   );
+diff --git a/packages/shared/src/relayTracing.ts b/packages/shared/src/relayTracing.ts
+index 128d04a670..4cb527dac6 100644
+--- a/packages/shared/src/relayTracing.ts
++++ b/packages/shared/src/relayTracing.ts
+@@ -10,6 +10,8 @@ import * as Tracer from "effect/Tracer";
+ import { HttpClient, HttpClientResponse } from "effect/http";
+ import { OtlpSerialization, OtlpTracer } from "effect/observability";
+ 
++import { telemetryDisabled } from "./otelEnvironment.ts";
++
+ export interface RelayClientTracingConfig {
+   readonly tracesUrl: string;
+   readonly tracesDataset: string;
+@@ -168,7 +170,7 @@ export function layer(
+   resource: RelayClientTracingResource,
+   options?: { readonly isEnabled?: () => boolean },
+ ): Layer.Layer<never, never, HttpClient.HttpClient> {
+-  if (config === null) {
++  if (telemetryDisabled() || config === null) {
+     return Layer.succeed(RelayClientTracer, Option.none());
+   }
+ 

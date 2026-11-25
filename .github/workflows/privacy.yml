@@ -1,0 +1,43 @@
+name: Privacy regression
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: privacy-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  privacy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DO_NOT_TRACK: "1"
+      EXPO_NO_TELEMETRY: "1"
+      CLERK_TELEMETRY_DISABLED: "1"
+      OTEL_SDK_DISABLED: "true"
+      T3CODE_OTEL_SDK_DISABLED: "true"
+      T3CODE_TELEMETRY_ENABLED: "false"
+      T3_TASK_CACHE_TELEMETRY: "off"
+      VP_REMOTE_CACHE: "off"
+      npm_config_ignore_scripts: "true"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check reviewed source before dependency installation
+        run: |
+          python3 privacy/check.py
+          python3 -m unittest discover -s privacy -p 'test_*.py' -v
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 26.13.1
+          package-manager-cache: false
+      - name: Install pinned package manager without lifecycle scripts
+        run: npm install --global pnpm@12.14.0 --ignore-scripts
+      - name: Install reviewed dependencies without lifecycle hooks
+        run: pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile
+      - name: Telemetry contracts, lint and affected-package typechecks
+        run: python3 privacy/verify.py

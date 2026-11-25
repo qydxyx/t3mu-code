@@ -1,0 +1,49 @@
+name: Privacy upstream sync
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 1 * * 1-5' # Weekdays 09:00 Asia/Shanghai; GitHub may delay runs.
+permissions:
+  contents: read
+concurrency:
+  group: privacy-upstream-sync
+  cancel-in-progress: false
+jobs:
+  inspect-and-replay:
+    if: github.repository == 'qydxyx/t3mu-code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      DO_NOT_TRACK: "1"
+      EXPO_NO_TELEMETRY: "1"
+      CLERK_TELEMETRY_DISABLED: "1"
+      OTEL_SDK_DISABLED: "true"
+      T3_TASK_CACHE_TELEMETRY: "off"
+      VP_REMOTE_CACHE: "off"
+      npm_config_ignore_scripts: "true"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check trusted maintenance snapshot
+        run: python3 privacy/check.py
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 26.13.1
+          package-manager-cache: false
+      - name: Install pinned package manager without lifecycle scripts
+        run: npm install --global pnpm@12.14.0 --ignore-scripts
+      - name: Fetch, review-gate, isolated replay and verification
+        run: python3 privacy/update.py --repo . --state "$RUNNER_TEMP/privacy-state"
+      - name: Produce non-executable review report, including blocked changes
+        if: always()
+        run: python3 privacy/report.py --repo . --state "$RUNNER_TEMP/privacy-state" --out "$RUNNER_TEMP/privacy-report"
+      - name: Retain review report (never execute or automatically merge it)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: privacy-upstream-review
+          path: ${{ runner.temp }}/privacy-report
+          retention-days: 14
+          if-no-files-found: warn
