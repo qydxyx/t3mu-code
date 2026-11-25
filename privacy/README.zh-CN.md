@@ -4,7 +4,7 @@
 
 - 用户仓库：https://github.com/qydxyx/t3mu-code ，默认分支 main。
 - 真实 fork parent/source：https://github.com/pingdotgg/t3code ，追踪 main（不是根据名字猜测）。
-- 审查基线：`ef4a1643edf72ad119452c82b01c91adbf7b9e64`。
+- 审查基线：`ef4a1643edf72ad119452c82b01c91adbf7b9e64`。交付前上游又前进到 `91f0b32e2db2cb8abca5fdd33c33609a0f57b15e`，其新代码已被真实默认 updater 返回 42 阻断，未执行/自动纳入。
 - `no-telemetry.patch` 只含禁遥测源码/契约测试/相关文档；维护脚本和 workflows 不递归打入 patch。
 - `manifest.json` 固定审查基线、patch 和维护工具的 SHA256、每个 patched file 最终 SHA256；这些是回归/意外漂移守卫，不是防恶意管理员篡改的签名。
 

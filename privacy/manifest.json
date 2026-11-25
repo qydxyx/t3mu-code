@@ -8,8 +8,8 @@
   "kit_hashes": {
     ".gitignore": "862263fa1f46c20f0d1e4dac5ffcc75abd55c08211b2c3864c5f8764b9d87793",
     "AUDIT.zh-CN.md": "505cb043587479ce69e8a7be36d2debc86d2a0fc2ba900f1b11843d3bbc63827",
-    "README.zh-CN.md": "5e3a72a4b64ea0526ff80d9770ddf58d39f289e529fbb129eb7071bd2977ac84",
-    "VALIDATION.zh-CN.md": "fa42ab69fac24cd8b6651b31915dc11ea5ab06e2224baab087545477c95bfa14",
+    "README.zh-CN.md": "adc05d142e8456cf4f34458cd54cb90b7240b4670ac730196602b221adfb8daa",
+    "VALIDATION.zh-CN.md": "467d95c88b0a3044deb4009b44f3944eb9f1761da53c7481725b72570fae0827",
     "apply.py": "34955bd6774bb9a965ae3e1df99ac127460c545318342c62da9a816abbe53bfc",
     "check.py": "507151890b202624da7c133c458cac5a5d926abe876d63be9f98c9554d5803b2",
     "daily.py": "83c6e77f9f2b6586150caab054b99e5f861bbfd54bce79febdf397f51752e2d1",

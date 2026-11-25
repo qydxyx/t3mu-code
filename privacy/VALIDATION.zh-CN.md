@@ -13,6 +13,12 @@
 - 真实负例：把 server AnalyticsService 临时换回未补丁上游实现，`privacy/check.py` 非零并指出 Patched boundary changed；新增未知 collector 出口文件也非零。负例文件已还原/移除；现有边界再次通过。
 - 官方 actionlint **1.7.12** 两份 workflow 校验通过（下载包 SHA256 校验），Python 编译、`git diff --check`（排除 patch 数据文件固有的上下文空白；patch 由真实 apply 校验）通过；actions/checkout、setup-node、upload-artifact 固定 commit。
 
+## 干净 clone 与交付时上游继续前进
+
+本地通过普通 `git clone --no-local` 得到独立完整 clone（不依赖旧 kit 目录），preflight 与全部 19 个 Python 测试通过。实际默认 updater 从真实上游 fetch 后观察到 `91f0b32e2db2cb8abca5fdd33c33609a0f57b15e`：比本次人工审查的 ef4a 又多三个提交（device 错误 Unicode、Pi 后台 subagent、删除 thread history），涉及 19 个运行/测试文件。门禁真实返回 **42**，在创建候选/安装新依赖/执行新代码之前停止，并成功生成只读 review report。
+
+本次交付已人工审阅并覆盖用户指定的 ef4a 增量，不冒称后续 91f0 的业务/数据库改动也已审查通过；那一批由后续维护按 AUDIT 流程处理。上游持续变化是设计中必须 fail-closed 的场景，不自动放宽 allowlist、不为追上移动目标无限扩展此次修改。
+
 ## 安装安全与未运行项
 
 本轮 ef4a 的依赖安装明确使用 `--frozen-lockfile --ignore-scripts --ignore-pnpmfile` 和 npm_config_ignore_scripts=true；先人工审阅完整源码与 lock/本地 native tgz 增量。早先 c925 探索阶段曾因 pnpm exec 自动触发生命周期/prepare，这不是本轮安全重放命令，不能把整个历史描述成从未执行过脚本。
